@@ -164,3 +164,4 @@ MilkChanDesktop/
 - Big thanks to the PyQt5, OpenAI, FFmpeg, and MSS communities.
 
 Have fun with MilkChan! Contributions and feature ideas are welcome—open an issue or PR.
+<img width="54" height="54" alt="9cfd552e0d7cc165f2d2a6c4aa4001b1d83edba5" src="https://github.com/user-attachments/assets/d44230ef-4d26-4598-88cb-61d22811a08e" />
