@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "milkchan"
+version = "1.0.0"
+description = "Unified AI Companion Desktop Application"
+authors = [
+    {name = "MilkChan Team"}
+]
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+keywords = ["ai", "companion", "desktop", "pyqt5", "fastapi"]
+
+dependencies = [
+    # Core
+    "python-dotenv>=1.0.1",
+    "requests>=2.32.3",
+    
+    # FastAPI / API
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.6",
+    "python-multipart>=0.0.18",
+    
+    # AI / OpenAI
+    "openai>=1.51.2",
+    "httpx>=0.27.2",
+    
+# Image processing
+"Pillow>=10.4.0",
+"opencv-python-headless>=4.10.0.84",  # Headless - no Qt conflict on Linux
+"numpy>=1.26.4",
+"scipy>=1.13.1",
+    
+    # Desktop GUI
+    "PyQt5>=5.15.10",
+    
+    # Screen capture
+    "mss>=9.0.1",
+    
+    # Audio
+    "soundcard>=0.4.3",
+    
+    # Storage
+    "firebase-admin>=6.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+]
+
+[project.scripts]
+milkchan = "milkchan.main:main"
+milkchan-desktop = "milkchan.desktop.app:run_desktop"
+milkchan-api = "milkchan.api.app:run_api"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["milkchan*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312']
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

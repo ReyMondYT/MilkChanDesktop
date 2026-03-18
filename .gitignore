@@ -1,0 +1,38 @@
+.venv/
+.mypy_cache/
+build/
+
+CHANGES.md
+context.py
+
+__pycache__/
+
+# Windows NUL device files
+nul
+
+# Sensitive
+milkchan/desktop/config.json
+
+# Storage
+milkchan/desktop/recordings/*
+milkchan/desktop/milkchan.db
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+*.spec
+*.toc
+*.pkg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.pyc
+*.pyo
+*_logs_*
