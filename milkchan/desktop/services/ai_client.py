@@ -99,7 +99,8 @@ def _get_llm():
             if user_tools.exists():
                 custom_tools_path = user_tools
             else:
-                custom_tools_path = Path(sys._MEIPASS) / "milkchan" / "custom_tools"
+                meipass = getattr(sys, '_MEIPASS', '.')
+                custom_tools_path = Path(meipass) / "milkchan" / "custom_tools"
         else:
             # Development
             custom_tools_path = Path(__file__).parent.parent.parent / "custom_tools"
