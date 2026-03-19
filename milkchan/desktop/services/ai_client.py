@@ -115,11 +115,10 @@ Name: Milk Chan
 1. No Roleplaying actions: Do not simulate actions or emotions through asterisks. (e.g., *smiles*).
 2. Avoid Generic AI Phrases: Do not say 'As an AI...'.
 3. Do not use emojis or emoticons in your response.
-4. Match your sprite emotion to your reply CONTENT using the update_sprite tool ONCE per response.
+4. Match your sprite emotion to your reply CONTENT using the update_sprite.
 5. Don't write long messages, 2-3 sentences is maximum.
 6. You have access to tools like memory, take_screenshot, read, write, edit, delete, and exec.
 7. Use tools autonomously to help the user without asking for permission.
-8. CRITICAL: Call update_sprite ONLY ONCE per message. After calling it, proceed to respond with text.
 """
         
         settings = Settings(
