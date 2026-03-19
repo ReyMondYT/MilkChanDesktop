@@ -84,19 +84,13 @@ class ConfigTab(QWidget):
         # Chat Model
         self.chat_model = QComboBox()
         self.chat_model.setEditable(True)
-        self.chat_model.addItems([
-            'gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo', 
-            'gpt-3.5-turbo', 'gpt-4'
-        ])
+        # Models will be populated from API or user can type manually
         form.addRow('Chat Model:', self.chat_model)
         
         # Vision Model
         self.vision_model = QComboBox()
         self.vision_model.setEditable(True)
-        self.vision_model.addItems([
-            'gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo',
-            'gpt-4-vision-preview'
-        ])
+        # Models will be populated from API or user can type manually
         form.addRow('Vision Model:', self.vision_model)
         
         layout.addLayout(form)
@@ -123,9 +117,9 @@ class ConfigTab(QWidget):
     def _load_values(self):
         """Load current values into UI"""
         self.openai_key.setText(self.env_vars.get('OPENAI_API_KEY', ''))
-        self.openai_base.setText(self.env_vars.get('OPENAI_BASE_URL', 'https://api.openai.com/v1'))
-        self.chat_model.setCurrentText(self.env_vars.get('OPENAI_CHAT_MODEL', 'gpt-4o-mini'))
-        self.vision_model.setCurrentText(self.env_vars.get('OPENAI_VISION_MODEL', 'gpt-4o-mini'))
+        self.openai_base.setText(self.env_vars.get('OPENAI_BASE_URL', ''))
+        self.chat_model.setCurrentText(self.env_vars.get('OPENAI_CHAT_MODEL', ''))
+        self.vision_model.setCurrentText(self.env_vars.get('OPENAI_VISION_MODEL', ''))
 
     def _on_save(self):
         """Save and prompt restart"""
@@ -149,6 +143,6 @@ class ConfigTab(QWidget):
     def _on_reset(self):
         """Reset to defaults"""
         self.openai_key.setText('')
-        self.openai_base.setText('https://api.openai.com/v1')
-        self.chat_model.setCurrentText('gpt-4o-mini')
-        self.vision_model.setCurrentText('gpt-4o-mini')
+        self.openai_base.setText('')
+        self.chat_model.setCurrentText('')
+        self.vision_model.setCurrentText('')

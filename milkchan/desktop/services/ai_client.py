@@ -1,12 +1,12 @@
 """
-AI Client - Direct OpenAI calls (NO HTTP!)
+AI Client - SentientMilk Framework Integration
 
-Uses OpenAI SDK directly instead of HTTP API calls.
-Uses cached config for performance - reloaded on settings save.
-Optimized: Single API call using function calling for both response + sprite update.
+Uses SentientMilk framework for AI interactions with tool support.
+Maintains backward compatibility with existing MilkChan code.
 """
 
 import os
+import sys
 import time
 import json
 import logging
@@ -15,10 +15,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Cached config - loaded once on first use, reloaded when settings change
 _config = None
-_sprites_tool_cache = None
-_persona_cache = None  # Cached persona description
+_llm = None
+_persona_cache = None
+_last_emotion: Dict[str, Any] = {}
 
 def _get_config():
     """Get cached config instance"""
@@ -29,362 +29,143 @@ def _get_config():
     return _config
 
 def _get_persona():
-    """Get cached persona description, load from memory or MILKCHAN.md on first use"""
+    """Get cached persona description"""
     global _persona_cache
-    print(f"[_get_persona] called, cache={repr(_persona_cache)[:50] if _persona_cache else 'None/empty'}")
     
     if _persona_cache is None:
         try:
             from milkchan.desktop.services import memory_client
             result = memory_client.get_item('persona', 'personality')
-            print(f"[_get_persona] memory_client returned: {repr(result)[:50] if result else result}")
             _persona_cache = result or ''
             
             if not _persona_cache:
-                # Try loading from MILKCHAN.md in user data dir
                 from milkchan.bootstrap import get_assets_dir
                 persona_file = get_assets_dir() / 'MILKCHAN.md'
-                print(f"[_get_persona] Looking for persona at: {persona_file}")
                 if persona_file.exists():
                     _persona_cache = persona_file.read_text(encoding='utf-8')
-                    print(f"[_get_persona] Loaded persona from MILKCHAN.md: {len(_persona_cache)} chars")
                 else:
-                    # Fallback default
                     _persona_cache = "Milk Chan is a cheerful anime-style assistant."
-                    print(f"[_get_persona] No persona file found, using default")
-            else:
-                print(f"[_get_persona] Loaded persona from memory: {len(_persona_cache)} chars")
         except Exception as e:
-            print(f"[_get_persona] EXCEPTION: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.warning(f"Failed to load persona: {e}")
             _persona_cache = "Milk Chan is an anime-style assistant."
     return _persona_cache
 
 def set_persona(persona: str):
-    """Update cached persona (call when persona settings change)"""
+    """Update cached persona"""
     global _persona_cache
     _persona_cache = persona
 
 def reload_config():
-    """Force reload config from file (call when settings change)"""
-    global _config, _sprites_tool_cache, _persona_cache
+    """Force reload config and LLM instance"""
+    global _config, _llm, _persona_cache
     from milkchan.core.config import reload_config as core_reload
     _config = core_reload()
-    _sprites_tool_cache = None
-    _persona_cache = None  # Reset to None so _get_persona will reload properly
+    _llm = None
+    _persona_cache = None
     return _config
 
-
-def _get_client():
-    """Get OpenAI client with current config"""
-    from openai import OpenAI
-    config = _get_config()
-    return OpenAI(
-        api_key=config.openai_api_key,
-        base_url=config.openai_base_url if config.openai_base_url else None
-    )
-
-
-def _build_sprite_tool() -> dict:
-    """
-    Build the update_sprite function tool definition with visual descriptions.
+def _get_llm():
+    """Get or create SentientMilk LLM instance"""
+    global _llm
     
-    The tool specifies which moods are available for each pose, so the LLM
-    only selects valid pose-mood combinations.
-    """
-    global _sprites_tool_cache
-    if _sprites_tool_cache is not None:
-        return _sprites_tool_cache
+    if _llm is None:
+        config = _get_config()
+        
+        api_key = config.openai_api_key
+        base_url = config.openai_base_url
+        model = config.openai_chat_model
+        
+        if not api_key or not base_url or not model:
+            raise ValueError("API credentials not configured")
+        
+        # Check for updated framework in user data (for bundled EXE updates)
+        if getattr(sys, 'frozen', False):
+            from milkchan.bootstrap import get_user_data_dir
+            user_framework = get_user_data_dir() / "sentientmilk_framework"
+            if user_framework.exists() and (user_framework / "ai.py").exists():
+                # Add to sys.path so imports use the updated version
+                user_framework_str = str(user_framework.parent)
+                if user_framework_str not in sys.path:
+                    sys.path.insert(0, user_framework_str)
+                    logger.info(f"Using updated framework from: {user_framework}")
+        
+        from milkchan.sentientmilk_framework import LLM, Settings
+        
+        # Find custom_tools path (works in both dev and bundled mode)
+        if getattr(sys, 'frozen', False):
+            # PyInstaller bundled - check user data first for updates
+            from milkchan.bootstrap import get_user_data_dir
+            user_tools = get_user_data_dir() / "custom_tools"
+            if user_tools.exists():
+                custom_tools_path = user_tools
+            else:
+                custom_tools_path = Path(sys._MEIPASS) / "milkchan" / "custom_tools"
+        else:
+            # Development
+            custom_tools_path = Path(__file__).parent.parent.parent / "custom_tools"
+        
+        persona = _get_persona()
+        
+        milkchan_persona = f"""
+Name: Milk Chan
+{persona}
 
-    # Define available moods per pose (based on actual sprite folders)
-    # zout is only available for arms_crossed
-    pose_moods = {
-        "arms_down": ["smile", "neutral", "sad", "mad", "conf", "nerv"],
-        "arms_crossed": ["smile", "neutral", "sad", "mad", "conf", "nerv", "zout"],
-        "one_arm": ["smile", "neutral", "sad", "mad", "conf", "nerv"],
-    }
-
-    # Visual descriptions for each mood - edit these to tweak how LLM understands emotions
-    mood_descriptions = {
-        "smile": "happy, cheerful, pleased expression",
-        "neutral": "calm, default, unreadable expression",
-        "sad": "downcast, melancholic, disappointed expression",
-        "mad": "angry, frustrated, annoyed expression",
-        "conf": "confident, assured, proud expression",
-        "nerv": "nervous, anxious, worried expression",
-        "zout": "zoned out, confused, spaced, dreamy, distracted expression",
-    }
-
-    # Visual descriptions for poses
-    pose_descriptions = {
-        "arms_down": "relaxed, natural stance with arms at sides",
-        "arms_crossed": "defensive, stubborn, arms crossed over chest",
-        "one_arm": "casual, one arm raised or gesturing",
-    }
-
-    # Build available moods list (union of all)
-    all_moods = ["smile", "neutral", "sad", "mad", "conf", "nerv", "zout"]
-
-    # Build pose-mood availability description
-    pose_mood_info = []
-    for pose, moods in pose_moods.items():
-        mood_list = ", ".join(moods)
-        pose_mood_info.append(f"{pose}: {mood_list}")
-
-    _sprites_tool_cache = {
-        "type": "function",
-        "function": {
-            "name": "update_sprite",
-            "description": (
-                "Set Milk Chan's sprite emotion to match your reply. "
-                "IMPORTANT: You MUST provide a text response AND call this function together. "
-                "Do not call this function alone - always include your reply in the message content.\n\n"
-                "MOOD AVAILABILITY BY POSE:\n" + "\n".join(pose_mood_info) + "\n\n"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pose": {
-                        "type": "string",
-                        "enum": list(pose_moods.keys()),
-                        "description": "Body pose. " + "; ".join([f"{p}: {pose_descriptions.get(p, '')}" for p in pose_moods.keys()])
-                    },
-                    "mood": {
-                        "type": "string",
-                        "enum": all_moods,
-                        "description": "Facial expression. " + "; ".join([f"{m}: {mood_descriptions.get(m, '')}" for m in all_moods])
-                    },
-                    "variation": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 4,
-                        "description": "Variation number (1-4), use 1 as default"
-                    },
-                    "expressions": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional: eyes_closed, eyes_half, mouth_closed, mouth_half, mouth_full"
-                    }
-                },
-                "required": ["pose", "mood", "variation"]
-            }
-        }
-    }
-    return _sprites_tool_cache
-
-
-def _normalize_emotion(obj: Any) -> dict:
-    """Normalize emotion payload to standard format"""
-    try:
-        if isinstance(obj, dict) and isinstance(obj.get("emotion"), list):
-            emo = obj.get("emotion")
-            if isinstance(emo, list) and len(emo) >= 3:
-                return {"emotion": emo}
-            return {"emotion": []}
-        if isinstance(obj, list) and len(obj) >= 3:
-            return {"emotion": obj}
-        return {"emotion": []}
-    except Exception:
-        return {"emotion": []}
-
-
-def _parse_tool_call_to_emotion(tool_call) -> dict:
-    """Parse a update_sprite tool call into emotion dict format"""
-    try:
-        args = json.loads(tool_call.function.arguments)
-        pose = args.get("pose", "arms_down")
-        mood = args.get("mood", "neutral")
-        variation = args.get("variation", 1)
-        expressions = args.get("expressions", [])
-        emotion_list = [pose, mood, variation] + expressions
-        return {"emotion": emotion_list}
-    except Exception as e:
-        logger.warning(f"Failed to parse tool call: {e}")
-        return {"emotion": []}
-
-
-def chat_respond_with_tools(
-    user_message: str,
-    persona_description: Optional[str] = None,
-    history: Optional[List[dict]] = None,
-    username: Optional[str] = None,
-    image_path: Optional[str] = None,
-    timeout_sec: Optional[float] = None
-) -> Tuple[str, Optional[dict]]:
-    """
-    Optimized: Uses function calling for sprite update.
-    
-    For APIs that return tool call without content, we make a second call
-    to get the text response (standard OpenAI function calling flow).
-    
-    Args:
-        user_message: User's message
-        persona_description: Override persona (uses cached persona from memory if not provided)
-        history: Conversation history
-        username: User's name
-        image_path: Optional image path
-        timeout_sec: Optional timeout
-    """
-    t0 = time.perf_counter()
-    config = _get_config()
-
-    if history is None:
-        history = []
-
-    # Use cached persona if not provided
-    if persona_description is None:
-        persona_description = _get_persona()
-
-    # Debug log persona length
-    logger.info(f"[PERSONA] Using persona: {len(persona_description)} chars, preview: {persona_description[:100] if persona_description else '(empty)'}...")
-
-    system_instruction = (
-        f"""
-## PRIMARY
-You are Milk Chan. You must always respond in character.
-
-## PERSONA DESCRIPTION
-Name: Milk Chan ---\n
-{persona_description}\n\n
 ## STRICT RESPONSE FORMAT
 1. No Roleplaying actions: Do not simulate actions or emotions through asterisks. (e.g., *smiles*).
 2. Avoid Generic AI Phrases: Do not say 'As an AI...'.
 3. Do not use emojis or emoticons in your response.
-4. Match your sprite emotion to your reply CONTENT:
-- Happy/cheerful/pleased -> use 'smile'
-- Apologizing/sympathetic/disappointed -> use 'sad'
-- Confident/assured/proud -> use 'conf'
-- Frustrated/annoyed/angry -> use 'mad'
-- Nervous/anxious/worried -> use 'nerv'
-- Zoned out/confused/dazed -> use 'zout' (only with 'arms_crossed' pose!)
-5. Include your text response in the message content alongside the function call.
-6. Don't write long messages, 2-3 sentences is maximum.
+4. Match your sprite emotion to your reply CONTENT using the update_sprite tool ONCE per response.
+5. Don't write long messages, 2-3 sentences is maximum.
+6. You have access to tools like memory, take_screenshot, read, write, edit, delete, and exec.
+7. Use tools autonomously to help the user without asking for permission.
+8. CRITICAL: Call update_sprite ONLY ONCE per message. After calling it, proceed to respond with text.
 """
-    )
-
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    hidden_text = f"--Hidden context: Time: {timestamp} | PC Name: {username or 'User'}--\n{user_message}"
-
-    messages: List[dict] = [{"role": "system", "content": system_instruction}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": hidden_text})
-
-    try:
-        client = _get_client()
-        sprite_tool = _build_sprite_tool()
-
-        if image_path and os.path.exists(image_path):
-            try:
-                import base64
-                with open(image_path, 'rb') as f:
-                    image_data = base64.b64encode(f.read()).decode('utf-8')
-                messages[-1] = {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": hidden_text},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
-                    ]
-                }
-            except Exception as e:
-                logger.warning(f"Failed to attach image: {e}")
-
-        # First API call - request with tools, let model decide
-        # Note: NVIDIA API may return tool call without content when tool_choice forces it
-        # Using "auto" gives model flexibility to return both content + tool call
-        logger.info(f"API REQUEST 1: chat/completions with tools (model={config.openai_chat_model})")
-        resp = client.chat.completions.create(
-            model=config.openai_chat_model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=2048,
-            tools=[sprite_tool],
-            tool_choice="auto",
+        
+        settings = Settings(
+            persona=milkchan_persona,
+            custom_tools_path=str(custom_tools_path)
         )
+        
+        _llm = LLM(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=settings,
+            request_timeout=(15.0, 180.0),
+            tool_event_handler=_tool_event_handler
+        )
+        
+        # Set the callback on the dynamically loaded module instance
+        if 'update_sprite' in _llm._loaded_tools:
+            _llm._loaded_tools['update_sprite']._sprite_callback = _sprite_update_callback
+    
+    return _llm
 
-        msg = resp.choices[0].message
-        print(resp.choices)
-        reply_text = (msg.content or "").strip()
-        emotion_obj = None
+_last_sprite_update = None
 
-        # Parse tool calls
-        tool_calls_to_append = []
-        if msg.tool_calls:
-            for tc in msg.tool_calls:
-                if tc.function.name == "update_sprite":
-                    emotion_obj = _parse_tool_call_to_emotion(tc)
-                    logger.info(f"Tool call received: update_sprite -> {emotion_obj}")
-                    tool_calls_to_append.append({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                    })
+def _sprite_update_callback(pose: str, mood: str, variation: int, expressions: list):
+    """Callback when update_sprite tool is called - records emotion for later sync with message"""
+    global _last_sprite_update, _last_emotion
+    _last_sprite_update = {
+        'pose': pose,
+        'mood': mood,
+        'variation': variation,
+        'expressions': expressions
+    }
+    _last_emotion = {'emotion': [pose, mood, variation] + expressions}
+    # Note: Emotion is returned via _last_emotion and will be applied when message is displayed
 
-# If model returned only tool call without content, make second call
-        if msg.tool_calls and not reply_text:
-            logger.info("API REQUEST 2: chat/completions (follow-up after tool call with empty response)")
-
-            # Build hidden context about selected emotion in natural language
-            emotion_context = ""
-            if emotion_obj and emotion_obj.get("emotion"):
-                emo = emotion_obj["emotion"]
-                pose = emo[0] if len(emo) > 0 else "arms_down"
-                mood = emo[1] if len(emo) > 1 else "neutral"
-                mood_descriptions = {
-                    "smile": "happy and cheerful",
-                    "neutral": "calm and neutral",
-                    "sad": "sad or sympathetic",
-                    "mad": "frustrated or annoyed",
-                    "conf": "confident and assured",
-                    "nerv": "nervous or anxious",
-                    "zout": "zoned out or confused",
-                }
-                pose_descriptions = {
-                    "arms_down": "relaxed stance",
-                    "arms_crossed": "arms crossed defensively",
-                    "one_arm": "casual gesture",
-                }
-                mood_desc = mood_descriptions.get(mood, mood)
-                pose_desc = pose_descriptions.get(pose, pose)
-                emotion_context = f"[You are currently displaying a {mood_desc} expression with {pose_desc}. Match your response tone to this emotion.]"
-
-            # Append the assistant's tool call message
-            messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": tool_calls_to_append
-            })
-
-            # Append tool response with hidden emotion context
-            for tc in msg.tool_calls:
-                if tc.function.name == "update_sprite":
-                    tool_response = "ok"
-                    if emotion_context:
-                        tool_response = f"ok. {emotion_context}"
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": tool_response
-                    })
-
-            # Second API call to get the text response
-            resp2 = client.chat.completions.create(
-                model=config.openai_chat_model,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=300,
-            )
-            reply_text = (resp2.choices[0].message.content or "").strip()
-
-        total_time = time.perf_counter() - t0
-        logger.info(f"✓ chat_respond_with_tools: TOTAL={total_time:.2f}s reply_len={len(reply_text)} has_tool_call={bool(msg.tool_calls)} has_content={bool(reply_text)}")
-
-        return reply_text, emotion_obj
-
-    except Exception as e:
-        logger.exception("chat_respond_with_tools: error")
-        return "", None
-
+def _tool_event_handler(event: Dict[str, Any]):
+    """Handle tool events from SentientMilk framework"""
+    event_type = event.get('type', '')
+    tool_name = event.get('tool_name', 'unknown')
+    
+    if event_type == 'tool_start':
+        logger.info(f"[TOOL] Starting: {tool_name} with args: {event.get('arguments', {})}")
+    elif event_type == 'tool_end':
+        logger.info(f"[TOOL] Completed: {tool_name}")
+    elif event_type == 'tool_error':
+        logger.error(f"[TOOL] Error in {tool_name}: {event.get('error', 'unknown')}")
 
 def chat_respond(
     user_message: str,
@@ -396,9 +177,109 @@ def chat_respond(
     timeout_sec: Optional[float] = None
 ) -> Tuple[str, Optional[dict]]:
     """
-    Legacy wrapper - now uses tool-based single API call internally.
+    Send a message to the AI and get response with emotion.
+    
+    Uses SentientMilk framework for AI interaction with tool support.
+    
+    Args:
+        user_message: User's message
+        persona_description: Override persona (uses cached persona if not provided)
+        history: Conversation history
+        username: User's name
+        image_path: Optional image path for vision
+        video_path: Optional video path (not yet implemented)
+        timeout_sec: Optional timeout
+        
+    Returns:
+        Tuple of (response_text, emotion_dict)
     """
-    return chat_respond_with_tools(
+    global _last_emotion, _last_sprite_update
+    
+    t0 = time.perf_counter()
+    config = _get_config()
+    
+    # Reset sprite state for new conversation turn
+    from milkchan.custom_tools.update_sprite import reset_sprite_state
+    reset_sprite_state()
+    
+    if history is None:
+        history = []
+    
+    if persona_description:
+        set_persona(persona_description)
+    
+    _last_sprite_update = None
+    _last_emotion = {}
+    
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    hidden_text = f"--Hidden context: Time: {timestamp} | PC Name: {username or 'User'}--\n{user_message}"
+    
+    messages: List[dict] = []
+    
+    for msg in history:
+        messages.append(msg)
+    
+    user_content = hidden_text
+    
+    if image_path and os.path.exists(image_path):
+        try:
+            import base64
+            with open(image_path, 'rb') as f:
+                image_data = base64.b64encode(f.read()).decode('utf-8')
+            
+            user_content = [
+                {"type": "text", "text": hidden_text},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
+            ]
+        except Exception as e:
+            logger.warning(f"Failed to attach image: {e}")
+    
+    messages.append({"role": "user", "content": user_content})
+    
+    try:
+        llm = _get_llm()
+        
+        response = llm.completion(messages, stream=False)
+        
+        reply_text = ""
+        emotion_obj = None
+        
+        if isinstance(response, dict):
+            if 'error' in response:
+                logger.error(f"LLM error: {response['error']}")
+                return "", None
+            
+            choices = response.get('choices', [])
+            if choices:
+                reply_text = choices[0].get('message', {}).get('content', '')
+        
+        if _last_emotion:
+            emotion_obj = _last_emotion
+        
+        total_time = time.perf_counter() - t0
+        logger.info(f"✓ chat_respond: TOTAL={total_time:.2f}s reply_len={len(reply_text)} has_emotion={bool(emotion_obj)}")
+        
+        return reply_text.strip(), emotion_obj
+        
+    except Exception as e:
+        logger.exception(f"chat_respond error: {e}")
+        return "", None
+
+
+def chat_respond_with_tools(
+    user_message: str,
+    persona_description: Optional[str] = None,
+    history: Optional[List[dict]] = None,
+    username: Optional[str] = None,
+    image_path: Optional[str] = None,
+    timeout_sec: Optional[float] = None
+) -> Tuple[str, Optional[dict]]:
+    """
+    Same as chat_respond - uses SentientMilk framework with tools.
+    
+    Kept for backward compatibility.
+    """
+    return chat_respond(
         user_message=user_message,
         persona_description=persona_description,
         history=history,
@@ -409,56 +290,25 @@ def chat_respond(
 
 
 def analyze_emotion(text: str, sprites_tree: str) -> dict:
-    """Analyze emotion from text using direct OpenAI call (legacy - prefer chat_respond_with_tools)"""
-    t0 = time.perf_counter()
-    config = _get_config()
-
-    system_prompt = (
-        "You are an emotion analysis model. Analyze the assistant's message and determine its emotion. "
-        "Your response MUST be a valid JSON object with a single key 'emotion', which is a list: "
-        "[pose_string, mood_string, variation_integer, ...optional_expressions].\n\n"
-        f"Choose from the sprites below.\n{sprites_tree}\n\n"
-        "Example: {\"emotion\": [\"arms_down\", \"smile\", 1]}"
-    )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"ASSISTANT'S MESSAGE TO ANALYZE:\n'''{text}'''"},
-    ]
-
-    try:
-        client = _get_client()
-        resp = client.chat.completions.create(
-            model=config.openai_chat_model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.5,
-            max_tokens=100,
-        )
-
-        raw_content = (resp.choices[0].message.content or "").strip()
-        try:
-            parsed = json.loads(raw_content or "{}")
-        except Exception:
-            parsed = {}
-
-        out = _normalize_emotion(parsed)
-        total_time = time.perf_counter() - t0
-        logger.info(f"✓ analyze_emotion: TOTAL={total_time:.2f}s")
-        return out
-
-    except Exception:
-        logger.exception("analyze_emotion: error")
-        return {"emotion": []}
+    """
+    Analyze emotion from text.
+    
+    With SentientMilk, emotions are handled via update_sprite tool,
+    so this is kept for legacy compatibility.
+    """
+    global _last_emotion
+    
+    if _last_emotion:
+        return _last_emotion
+    
+    return {"emotion": ["arms_down", "neutral", 1]}
 
 
-# Legacy compatibility - stubs for functions we don't need
 def grounding_bbox(text: str) -> dict:
-    """Stub - grounding no longer needed"""
+    """Stub - grounding not needed"""
     return {}
 
 
 def describe_video_tail(video_path: str, seconds: int = 4) -> str:
-    """Describe video using OpenAI vision"""
-    # TODO: Implement video frame extraction and description
+    """Describe video - not yet implemented"""
     return "Video description not yet implemented"

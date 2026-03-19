@@ -173,7 +173,7 @@ class SpriteWindow(QMainWindow):
 
         self.schedule_next_blink()
         self.schedule_proactive_message()
-
+    
     def __del__(self):
         try:
             self.background_recorder.stop_recording()
@@ -536,6 +536,7 @@ class SpriteWindow(QMainWindow):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         menu = QMenu(self)
         menu.addAction('Settings', self.open_settings)
+        menu.addAction('Check for Updates', self.check_for_updates)
         menu.addAction('Clear History', self.clear_history)
         menu.addAction('Exit', QApplication.quit)
         menu.exec_(self.mapToGlobal(event.pos()))
@@ -679,6 +680,76 @@ class SpriteWindow(QMainWindow):
         except Exception:
             pass
         self.chat_overlay.handle_response('History cleared!', {'emotion': ['arms_down', 'smile', 1]})
+
+    def check_for_updates(self):
+        """Check for updates from GitHub repository"""
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        
+        from milkchan.core.updater import check_updates_sync, format_update_message
+        
+        # Show checking message
+        self.chat_overlay.handle_response('Checking for updates...', {'emotion': ['arms_down', 'smile', 1]})
+        QApplication.processEvents()
+        
+        # Check for updates
+        update_info = check_updates_sync(force=True)
+        
+        if update_info is None:
+            QMessageBox.warning(self, 'Update Check Failed', 
+                              'Failed to check for updates.\n\nMake sure you have:\n'
+                              '1. GitHub CLI (gh) installed\n'
+                              '2. Access to the private repository\n'
+                              '3. Internet connection')
+        elif update_info.available:
+            # Update available - show dialog
+            message = format_update_message(update_info)
+            reply = QMessageBox.question(
+                self, 
+                'Update Available',
+                message + '\n\nWould you like to apply this update now?\n'
+                         '(This will restart the application)',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                from milkchan.core.updater import get_updater
+                updater = get_updater()
+                
+                self.chat_overlay.handle_response('Applying update...', {'emotion': ['arms_down', 'smile', 1]})
+                QApplication.processEvents()
+                
+                if updater.apply_update():
+                    QMessageBox.information(
+                        self,
+                        'Update Applied',
+                        'Update applied successfully!\n\nThe application will now restart.'
+                    )
+                    
+                    # Restart the application
+                    import subprocess
+                    subprocess.Popen([sys.executable, '-m', 'milkchan.main'])
+                    QApplication.quit()
+                else:
+                    QMessageBox.critical(
+                        self,
+                        'Update Failed',
+                        'Failed to apply update.\n\nPlease check the logs for details.'
+                    )
+            else:
+                self.chat_overlay.handle_response('Update postponed.', {'emotion': ['arms_down', 'smile', 1]})
+        else:
+            # No updates available
+            QMessageBox.information(
+                self,
+                'No Updates',
+                f'You are already on the latest version!\n\n'
+                f'Commit: {update_info.current_sha[:7]}\n'
+                f'Date: {update_info.commit_date[:10]}'
+            )
+            self.chat_overlay.handle_response('You are up to date!', {'emotion': ['arms_down', 'smile', 1]})
+        
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
     def update_position(self):
         from PyQt5.QtWidgets import QDesktopWidget

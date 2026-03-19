@@ -5,9 +5,11 @@ All settings stored in ~/.milkchan/config.json
 
 import os
 import json
+import shutil
 from pathlib import Path
 from getpass import getuser
 from typing import Optional, Any, Dict
+from datetime import datetime
 
 from milkchan.bootstrap import get_config_path, get_user_data_dir
 
@@ -39,9 +41,9 @@ class Config:
 
             # API Configuration - stored in config.json!
             "openai_api_key": "",
-            "openai_base_url": "https://api.openai.com/v1",
-            "openai_chat_model": "gpt-4o-mini",
-            "openai_vision_model": "gpt-4o-mini",
+            "openai_base_url": "",
+            "openai_chat_model": "",
+            "openai_vision_model": "",
 
             "processing": {
                 "vision_mode": "image",
@@ -63,6 +65,14 @@ class Config:
                 "min_interval_sec": 15.0,
                 "min_change_percent": 6.0,
                 "highlight_score_threshold": 0.55,
+            },
+            "updates": {
+                "auto_check": True,
+                "auto_update": False,
+                "check_interval_hours": 24,
+                "github_repo": "obezbolen67/SentientMilk",
+                "branch": "master",
+                "github_token": "",
             },
         }
 
@@ -89,7 +99,20 @@ class Config:
             self._config = default_config
     
     def save(self) -> None:
-        """Save configuration to file"""
+        """Save configuration to file with backup"""
+        config_file = Path(self.config_path)
+        
+        # Create backup before overwriting
+        if config_file.exists():
+            try:
+                backup_dir = config_file.parent / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = backup_dir / f"config_backup_{timestamp}.json"
+                shutil.copy(config_file, backup_path)
+            except Exception:
+                pass  # Don't fail save if backup fails
+        
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(self._config, f, indent=4)
     
@@ -136,7 +159,7 @@ class Config:
     
     @property
     def openai_base_url(self) -> str:
-        return self._config.get("openai_base_url", "https://api.openai.com/v1")
+        return self._config.get("openai_base_url", "")
     
     @openai_base_url.setter
     def openai_base_url(self, value: str):
@@ -145,7 +168,7 @@ class Config:
     
     @property
     def openai_chat_model(self) -> str:
-        return self._config.get("openai_chat_model", "gpt-4o-mini")
+        return self._config.get("openai_chat_model", "")
     
     @openai_chat_model.setter
     def openai_chat_model(self, value: str):
@@ -154,7 +177,7 @@ class Config:
     
     @property
     def openai_vision_model(self) -> str:
-        return self._config.get("openai_vision_model", self.openai_chat_model)
+        return self._config.get("openai_vision_model", "")
 
     @openai_vision_model.setter
     def openai_vision_model(self, value: str):

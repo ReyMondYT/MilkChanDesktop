@@ -305,9 +305,7 @@ class APITab(QWidget):
         self.chat_model_combo = QComboBox()
         self.chat_model_combo.setEditable(True)
         self.chat_model_combo.setMinimumHeight(32)
-        self.chat_model_combo.addItems([
-            'gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo', 'gpt-4'
-        ])
+        # Models will be populated from API on load
         chat_refresh_btn = QPushButton('🔄')
         chat_refresh_btn.setMinimumHeight(32)
         chat_refresh_btn.setMaximumWidth(40)
@@ -325,9 +323,7 @@ class APITab(QWidget):
         self.vision_model_combo = QComboBox()
         self.vision_model_combo.setEditable(True)
         self.vision_model_combo.setMinimumHeight(32)
-        self.vision_model_combo.addItems([
-            'gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'
-        ])
+        # Models will be populated from API on load
         vision_refresh_btn = QPushButton('🔄')
         vision_refresh_btn.setMinimumHeight(32)
         vision_refresh_btn.setMaximumWidth(40)
@@ -340,6 +336,12 @@ class APITab(QWidget):
         vision_wrap = QWidget()
         vision_wrap.setLayout(vision_layout)
         form.addRow('Vision Model:', vision_wrap)
+        
+        # GitHub Token (for private framework repo updates)
+        self.github_token_edit = QLineEdit()
+        self.github_token_edit.setPlaceholderText('ghp_... (optional, for private repo updates)')
+        self.github_token_edit.setEchoMode(QLineEdit.Password)
+        form.addRow('GitHub Token:', self.github_token_edit)
 
         # Status label
         self.status_label = QLabel('')
@@ -390,8 +392,13 @@ class APITab(QWidget):
     
     def _update_models(self, models: list):
         """Update combo boxes with fetched models"""
+        # Save current text before clearing (in case user typed something)
+        current_chat = self.chat_model_combo.currentText().strip()
+        current_vision = self.vision_model_combo.currentText().strip()
+        
         if not models:
-            self.status_label.setText('No models - use valid API key')
+            self.status_label.setText('No models from API - you can type manually')
+            # Keep whatever user has typed
             return
 
         # Update chat model combo
@@ -402,20 +409,30 @@ class APITab(QWidget):
         # Update vision model combo
         self.vision_model_combo.clear()
         for m in models:
-            if 'vision' in m.lower() or 'gpt-4' in m.lower() or 'gpt-4o' in m.lower():
-                self.vision_model_combo.addItem(m)
+            # Add all models to vision - user can choose any
+            self.vision_model_combo.addItem(m)
 
-        # RESTORE saved values if they exist in the new list
-        if hasattr(self, '_saved_chat_model') and self._saved_chat_model:
+        # RESTORE current text or saved values
+        # Priority: current text > saved value > first model
+        if current_chat:
+            # User had typed something, preserve it
+            if self.chat_model_combo.findText(current_chat) < 0:
+                self.chat_model_combo.addItem(current_chat)
+            self.chat_model_combo.setCurrentText(current_chat)
+        elif hasattr(self, '_saved_chat_model') and self._saved_chat_model:
             index = self.chat_model_combo.findText(self._saved_chat_model)
             if index >= 0:
                 self.chat_model_combo.setCurrentIndex(index)
             else:
-                # Saved value not in list, add it
                 self.chat_model_combo.addItem(self._saved_chat_model)
                 self.chat_model_combo.setCurrentText(self._saved_chat_model)
 
-        if hasattr(self, '_saved_vision_model') and self._saved_vision_model:
+        if current_vision:
+            # User had typed something, preserve it
+            if self.vision_model_combo.findText(current_vision) < 0:
+                self.vision_model_combo.addItem(current_vision)
+            self.vision_model_combo.setCurrentText(current_vision)
+        elif hasattr(self, '_saved_vision_model') and self._saved_vision_model:
             index = self.vision_model_combo.findText(self._saved_vision_model)
             if index >= 0:
                 self.vision_model_combo.setCurrentIndex(index)
@@ -423,15 +440,19 @@ class APITab(QWidget):
                 self.vision_model_combo.addItem(self._saved_vision_model)
                 self.vision_model_combo.setCurrentText(self._saved_vision_model)
 
-        self.status_label.setText(f'Loaded {len(models)} models')
+        self.status_label.setText(f'Loaded {len(models)} models from API')
 
     def load_values(self, cfg: dict):
         self.api_key_edit.setText(cfg.get('openai_api_key', ''))
-        self.base_url_edit.setText(cfg.get('openai_base_url', 'https://api.openai.com/v1'))
+        self.base_url_edit.setText(cfg.get('openai_base_url', ''))
+        
+        # Load GitHub token from updates config
+        updates_cfg = cfg.get('updates', {})
+        self.github_token_edit.setText(updates_cfg.get('github_token', ''))
 
         # Store saved values BEFORE doing anything else
-        self._saved_chat_model = cfg.get('openai_chat_model', 'gpt-4o-mini')
-        self._saved_vision_model = cfg.get('openai_vision_model', 'gpt-4o-mini')
+        self._saved_chat_model = cfg.get('openai_chat_model', '')
+        self._saved_vision_model = cfg.get('openai_vision_model', '')
 
         # Set current selections from saved config
         if self._saved_chat_model:
@@ -444,10 +465,27 @@ class APITab(QWidget):
             self._fetch_models_async()
 
     def save_values(self, cfg: dict):
-        cfg['openai_api_key'] = self.api_key_edit.text().strip()
-        cfg['openai_base_url'] = self.base_url_edit.text().strip()
-        cfg['openai_chat_model'] = self.chat_model_combo.currentText().strip()
-        cfg['openai_vision_model'] = self.vision_model_combo.currentText().strip()
+        # Only save non-empty values to avoid overwriting existing config
+        api_key = self.api_key_edit.text().strip()
+        base_url = self.base_url_edit.text().strip()
+        chat_model = self.chat_model_combo.currentText().strip()
+        vision_model = self.vision_model_combo.currentText().strip()
+        github_token = self.github_token_edit.text().strip()
+        
+        if api_key:
+            cfg['openai_api_key'] = api_key
+        if base_url:
+            cfg['openai_base_url'] = base_url
+        if chat_model:
+            cfg['openai_chat_model'] = chat_model
+        if vision_model:
+            cfg['openai_vision_model'] = vision_model
+        
+        # Save GitHub token to updates config
+        if 'updates' not in cfg:
+            cfg['updates'] = {}
+        if github_token:
+            cfg['updates']['github_token'] = github_token
 
 
 class DesktopTab(QWidget):

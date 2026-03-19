@@ -22,6 +22,17 @@ echo =========================================================================
 echo.
 
 echo [1/6] Setting up environment...
+
+REM Check if venv exists but is broken (points to non-existent Python)
+if exist "%ROOT%.venv\pyvenv.cfg" (
+  findstr /C:"Python313" "%ROOT%.venv\pyvenv.cfg" >nul 2>&1
+  if not errorlevel 1 (
+    echo [!] Found broken venv (Python 3.13 removed)
+    echo [*] Removing old venv...
+    rmdir /s /q "%ROOT%.venv"
+  )
+)
+
 if not defined VIRTUAL_ENV (
   if exist "%ROOT%.venv\Scripts\activate.bat" (
     call "%ROOT%.venv\Scripts\activate.bat"
@@ -30,7 +41,7 @@ if not defined VIRTUAL_ENV (
   ) else (
     echo [!] No virtual environment found
     echo [*] Creating virtual environment...
-    py -3 -m venv "%ROOT%.venv" || goto :error
+    python -m venv "%ROOT%.venv" || goto :error
     call "%ROOT%.venv\Scripts\activate.bat"
   )
 )

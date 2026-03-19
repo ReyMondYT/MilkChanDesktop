@@ -461,9 +461,81 @@ def setup_user_data(
         return False
 
 
+def check_framework_update_on_first_run() -> bool:
+    """Check for framework updates on first run and ask user
+    
+    Returns:
+        True if update was applied or not needed, False if user rejected
+    """
+    from milkchan.core.updater import AutoUpdater
+    
+    updater = AutoUpdater(auto_check=False)
+    
+    # Check for updates
+    info = updater.check_for_updates(force=True)
+    
+    if not info or not info.available:
+        logger.info("No framework updates available")
+        return True
+    
+    # Check if user already rejected this specific version
+    state = updater._load_state()
+    rejected_sha = state.get('update_rejected', '')
+    if rejected_sha == info.latest_sha:
+        logger.info(f"User previously rejected update {info.latest_sha[:7]}, skipping")
+        return True
+    
+    # Show dialog asking user
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    
+    app = QApplication.instance()
+    if app is None:
+        return True
+    
+    message = (
+        f"A framework update is available!\n\n"
+        f"Version: {info.latest_sha[:7]}\n"
+        f"Released: {info.commit_date[:10]}\n\n"
+        f"This update may include bug fixes and improvements.\n\n"
+        f"Would you like to download it now?"
+    )
+    
+    reply = QMessageBox.question(
+        None,
+        'Framework Update Available',
+        message,
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.Yes
+    )
+    
+    if reply == QMessageBox.Yes:
+        logger.info("User accepted framework update")
+        success = updater.apply_update(backup=True)
+        if success:
+            QMessageBox.information(
+                None,
+                'Update Complete',
+                'Framework updated successfully!\n\nThe application will now restart.'
+            )
+            return True
+        else:
+            QMessageBox.warning(
+                None,
+                'Update Failed',
+                'Failed to apply update. Check logs for details.'
+            )
+            return True
+    else:
+        logger.info("User rejected framework update")
+        # Save rejection so we don't ask again for this version
+        state['update_rejected'] = info.latest_sha
+        updater._save_state(state)
+        return True
+
+
 def run_setup_dialog() -> bool:
     """Run setup with Qt progress dialog"""
-    from PyQt5.QtWidgets import QProgressDialog, QApplication
+    from PyQt5.QtWidgets import QProgressDialog, QApplication, QMessageBox
     from PyQt5.QtCore import Qt, QTimer
     
     if not is_first_run():
@@ -509,6 +581,11 @@ def run_setup_dialog() -> bool:
         QApplication.processEvents()
         QTimer.singleShot(500, dialog.close)
         QApplication.processEvents()
+        
+        # Check for framework updates on first run
+        if getattr(sys, 'frozen', False):
+            # Only show update dialog for bundled EXE
+            check_framework_update_on_first_run()
     else:
         dialog.close()
     

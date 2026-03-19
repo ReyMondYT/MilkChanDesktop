@@ -24,6 +24,8 @@ build/
 *.toc
 *.pkg
 
+sentientmilk_framework/
+
 # Virtual environments
 .venv/
 venv/

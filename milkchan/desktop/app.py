@@ -84,6 +84,30 @@ def main():
 
     # Initialize SQLite database
     _init_database()
+    
+    # Initialize auto-updater
+    from milkchan.core.config import get_config
+    from milkchan.core.updater import get_updater
+    
+    config = get_config()
+    updates_config = config.get('updates', {})
+    
+    def on_update_available(update_info):
+        """Callback when update is available - show system notification"""
+        logging.info(f"Auto-update available: {update_info.current_sha[:7]} -> {update_info.latest_sha[:7]}")
+    
+    updater = get_updater(
+        auto_check=updates_config.get('auto_check', True),
+        check_interval_hours=updates_config.get('check_interval_hours', 24),
+        auto_update=updates_config.get('auto_update', False),
+        github_token=updates_config.get('github_token', ''),
+        on_update_available=on_update_available
+    )
+    
+    # Start automatic update checking
+    if updater.auto_check:
+        updater.start_auto_check()
+        logging.info("Auto-updater initialized and started")
 
     app = QApplication(sys.argv)
     # Keep running even if all windows are hidden; required for tray-only operation
@@ -180,6 +204,13 @@ def main():
         menu.addSeparator()
         act_exit = menu.addAction('Exit')
         def _do_exit():
+            # Stop auto-updater if running
+            try:
+                from milkchan.core.updater import get_updater
+                updater = get_updater()
+                updater.stop_auto_check()
+            except Exception:
+                pass
             try:
                 tray.hide()
             except Exception:
