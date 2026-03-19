@@ -1,8 +1,12 @@
 import os
-from PyQt5.QtCore import Qt, QTimer, QUrl, QSize
+import json
+import subprocess
+import tempfile
+import markdown2
+from PyQt5.QtCore import Qt, QTimer, QUrl, QSize, pyqtSignal
 from PyQt5.QtGui import QFont, QFontDatabase, QTextCursor, QPixmap
 from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
-from PyQt5.QtWidgets import QWidget, QLabel, QTextEdit
+from PyQt5.QtWidgets import QWidget, QLabel, QTextEdit, QTextBrowser, QPushButton, QSizePolicy
 from milkchan.desktop.services import ai_client
 from milkchan.desktop.utils.sprites import load_sprite_mappings, build_sprite_tree_string
 from milkchan.bootstrap import get_assets_dir
@@ -31,6 +35,8 @@ class ChatTextEdit(QTextEdit):
 
 
 class ChatOverlay(QWidget):
+    terminal_closed = pyqtSignal()
+
     def __init__(self, parent=None, config=None):
         super().__init__(parent)
         self.config = config or {}
@@ -52,6 +58,10 @@ class ChatOverlay(QWidget):
         self.worker = None
         self.timer_reset_for_this_message = False
         self.last_emotion = None
+
+        self.chat_history = []
+        self.terminal_process = None
+        self.history_file = None
 
         self.setup_ui()
         self.hide()
@@ -79,11 +89,39 @@ class ChatOverlay(QWidget):
         self.user_input.setStyleSheet('background-color: rgba(0,0,0,80); color: white; border: none; padding: 8px;')
         self.user_input.textChanged.connect(self.on_user_typing)
 
-        self.ai_response = QTextEdit(self)
+        self.ai_response = QTextBrowser(self)
         self.ai_response.setReadOnly(True)
-        self.ai_response.setStyleSheet('background-color: rgba(0,0,0,80); color: #5d2023; border: none; padding: 8px;')
+        self.ai_response.setAcceptRichText(True)
+        self.ai_response.setOpenExternalLinks(True)
+        self.ai_response.setStyleSheet('background-color: rgba(0,0,0,80); color: #e6e6e6; border: none; padding: 8px;')
         self.ai_response.installEventFilter(self)
         self.ai_response.hide()
+
+        self.expand_btn = QPushButton('[ ]', self)
+        self.expand_btn.setFixedSize(24, 24)
+        self.expand_btn.setCursor(Qt.PointingHandCursor)
+        self.expand_btn.setStyleSheet('''
+            QPushButton {
+                background-color: rgba(172, 50, 50, 180);
+                color: #e6e6e6;
+                border: 2px solid #ac3232;
+                border-radius: 4px;
+                font-family: 'Retro Gaming', monospace;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #c23b3b;
+                border-color: #c23b3b;
+            }
+        ''')
+        self.expand_btn.setToolTip('Expand to terminal')
+        self.expand_btn.hide()
+        self.expand_btn.clicked.connect(self._open_terminal_chat)
+        self.expand_btn.raise_()
+
+        self._btn_hover_timer = QTimer(self)
+        self._btn_hover_timer.setSingleShot(True)
+        self._btn_hover_timer.timeout.connect(self._check_hover)
 
         # Initial sizing, fonts and placement
         self.update_scale(self.config.get('scale_factor', 100))
@@ -125,6 +163,83 @@ class ChatOverlay(QWidget):
         elif is_empty and self.timer_reset_for_this_message:
             self.timer_reset_for_this_message = False
 
+    def enterEvent(self, event):
+        self.expand_btn.show()
+        self._btn_hover_timer.start(100)
+
+    def leaveEvent(self, event):
+        self._btn_hover_timer.stop()
+        if not self.expand_btn.underMouse():
+            self.expand_btn.hide()
+
+    def _check_hover(self):
+        if not self.underMouse() and not self.expand_btn.underMouse():
+            self.expand_btn.hide()
+        else:
+            self._btn_hover_timer.start(100)
+
+    def _open_terminal_chat(self):
+        self._save_history_to_file()
+        terminal_script = os.path.join(os.path.dirname(__file__), '..', '..', 'terminal_chat.py')
+        terminal_script = os.path.abspath(terminal_script)
+
+        # Stop any active response
+        self.response_timer.stop()
+        self.audio_player.stop()
+        try:
+            self.parent().stop_speech_animation()
+        except Exception:
+            pass
+
+        # Hide all UI elements
+        self.user_input.hide()
+        self.ai_response.hide()
+        self.agent_question_label.hide()
+        self.expand_btn.hide()
+        self.hide()
+
+        if os.name == 'nt':
+            self.terminal_process = subprocess.Popen([
+                'cmd', '/c', 'start', 'cmd', '/k',
+                'python', terminal_script, self.history_file
+            ], shell=True)
+        else:
+            self.terminal_process = subprocess.Popen([
+                'x-terminal-emulator', '-e', 'python', terminal_script, self.history_file
+            ])
+
+        self._start_terminal_watcher()
+
+    def _save_history_to_file(self):
+        if self.history_file is None:
+            fd, self.history_file = tempfile.mkstemp(suffix='.json', prefix='milkchan_chat_')
+            os.close(fd)
+        with open(self.history_file, 'w', encoding='utf-8') as f:
+            json.dump(self.chat_history, f)
+
+    def _start_terminal_watcher(self):
+        self._terminal_watcher = QTimer(self)
+        self._terminal_watcher.timeout.connect(self._check_terminal_closed)
+        self._terminal_watcher.start(500)
+
+    def _check_terminal_closed(self):
+        if self.terminal_process and self.terminal_process.poll() is not None:
+            self._terminal_watcher.stop()
+            self._load_history_from_file()
+            self.terminal_process = None
+            # Don't auto-show - let user decide when to open chatbox again
+
+    def _load_history_from_file(self):
+        if self.history_file and os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    self.chat_history = json.load(f)
+            except Exception:
+                pass
+
+    def _add_to_history(self, role: str, content: str):
+        self.chat_history.append({'role': role, 'content': content})
+
     def interrupt_response(self):
         self.response_timer.stop()
         self.audio_player.stop()
@@ -153,6 +268,12 @@ class ChatOverlay(QWidget):
         self.user_input.setGeometry(*geom)
         self.ai_response.setGeometry(*geom)
         self.agent_question_label.setGeometry(*geom)
+
+        # Position expand button inside textbox area (top-right)
+        btn_x = scaled_left + scaled_width - self.expand_btn.width() - 4
+        btn_y = scaled_top + 4
+        self.expand_btn.move(btn_x, btn_y)
+        self.expand_btn.raise_()
 
     def update_scale(self, scale_percentage: int):
         # Scale the overlay art but keep text size constant in pixels (decoupled from sprite scale)
@@ -190,6 +311,7 @@ class ChatOverlay(QWidget):
             self.parent().provide_answer_to_agent(text)
             self.hide_agent_question()
             return
+        self._add_to_history('user', text)
         self.timer_reset_for_this_message = False
         self.user_input.hide()
         self.ai_response.clear()
@@ -248,6 +370,7 @@ class ChatOverlay(QWidget):
 
         self.current_response = response
         self.displayed_chars = 0
+        self._add_to_history('assistant', response)
 
         # Start narration loop, if configured
         if self.audio_player.mediaStatus() != QMediaPlayer.NoMedia:
@@ -269,16 +392,147 @@ class ChatOverlay(QWidget):
             self.response_timer.stop()
             self.audio_player.stop()
             self.parent().stop_speech_animation()
+            self._render_markdown()
             return
 
         chunk_size = min(3, len(self.current_response) - self.displayed_chars)
-        self.ai_response.insertPlainText(self.current_response[self.displayed_chars:self.displayed_chars + chunk_size])
         self.displayed_chars += chunk_size
-        self.ai_response.moveCursor(QTextCursor.End)
+        
+        # Render markdown live during streaming
+        self._render_markdown_streaming()
 
         if self.audio_player.state() != QMediaPlayer.PlayingState:
             if self.displayed_chars < len(self.current_response):
                 self.audio_player.play()
+
+    def _close_unclosed_tags(self, text: str) -> str:
+        import re
+        open_tags = []
+        tag_pattern = re.compile(r'<(/?\w+)[^>]*>')
+        for match in tag_pattern.finditer(text):
+            tag = match.group(1)
+            if tag.startswith('/'):
+                tag_name = tag[1:]
+                if open_tags and open_tags[-1] == tag_name:
+                    open_tags.pop()
+            else:
+                open_tags.append(tag)
+        for tag in reversed(open_tags):
+            text += f'</{tag}>'
+        return text
+
+    def _render_markdown_streaming(self):
+        text_so_far = self.current_response[:self.displayed_chars]
+        
+        try:
+            html = markdown2.markdown(
+                text_so_far,
+                extras=['fenced-code-blocks', 'code-friendly', 'tables', 'strike', 'task_list']
+            )
+            html = self._close_unclosed_tags(html)
+        except Exception:
+            html = text_so_far.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+        
+        styled_html = f'''
+        <style>
+            body {{ color: #e6e6e6; font-family: '{self.font_family}', sans-serif; }}
+            h1, h2, h3, h4, h5, h6 {{ color: #ff6b6b; margin-top: 12px; margin-bottom: 6px; }}
+            h1 {{ font-size: 1.4em; }}
+            h2 {{ font-size: 1.2em; }}
+            h3 {{ font-size: 1.1em; }}
+            p {{ margin: 6px 0; }}
+            code {{
+                background-color: #2a2a3e;
+                color: #ff79c6;
+                padding: 2px 6px;
+                border-radius: 4px;
+                font-family: '{self.font_family}', sans-serif !important;
+            }}
+            pre {{
+                background-color: #1a1a2e;
+                border: 1px solid #3a3a4e;
+                border-radius: 6px;
+                padding: 10px;
+                overflow-x: auto;
+                margin: 8px 0;
+            }}
+            pre code {{
+                background-color: transparent;
+                color: #f8f8f2;
+                padding: 0;
+            }}
+            blockquote {{
+                border-left: 3px solid #ac3232;
+                margin: 8px 0;
+                padding-left: 12px;
+                color: #9a9a9a;
+            }}
+            ul, ol {{ margin: 6px 0; padding-left: 20px; }}
+            li {{ margin: 2px 0; }}
+            a {{ color: #8be9fd; text-decoration: none; }}
+            strong {{ color: #ffb86c; }}
+            em {{ color: #f1fa8c; }}
+            hr {{ border: none; border-top: 1px solid #3a3a4e; margin: 12px 0; }}
+        </style>
+        {html}
+        '''
+        self.ai_response.setHtml(styled_html)
+        self._scroll_to_bottom()
+
+    def _scroll_to_bottom(self):
+        scrollbar = self.ai_response.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _render_markdown(self):
+        html = markdown2.markdown(
+            self.current_response,
+            extras=['fenced-code-blocks', 'code-friendly', 'tables', 'strike', 'task_list']
+        )
+        styled_html = f'''
+        <style>
+            body {{ color: #e6e6e6; font-family: '{self.font_family}', sans-serif; }}
+            h1, h2, h3, h4, h5, h6 {{ color: #ff6b6b; margin-top: 12px; margin-bottom: 6px; }}
+            h1 {{ font-size: 1.4em; }}
+            h2 {{ font-size: 1.2em; }}
+            h3 {{ font-size: 1.1em; }}
+            p {{ margin: 6px 0; }}
+            code {{
+                background-color: #2a2a3e;
+                color: #ff79c6;
+                padding: 2px 6px;
+                border-radius: 4px;
+                font-family: '{self.font_family}', sans-serif !important;
+            }}
+            pre {{
+                background-color: #1a1a2e;
+                border: 1px solid #3a3a4e;
+                border-radius: 6px;
+                padding: 10px;
+                overflow-x: auto;
+                margin: 8px 0;
+            }}
+            pre code {{
+                background-color: transparent;
+                color: #f8f8f2;
+                padding: 0;
+            }}
+            blockquote {{
+                border-left: 3px solid #ac3232;
+                margin: 8px 0;
+                padding-left: 12px;
+                color: #9a9a9a;
+            }}
+            ul, ol {{ margin: 6px 0; padding-left: 20px; }}
+            li {{ margin: 2px 0; }}
+            a {{ color: #8be9fd; text-decoration: none; }}
+            strong {{ color: #ffb86c; }}
+            em {{ color: #f1fa8c; }}
+            hr {{ border: none; border-top: 1px solid #3a3a4e; margin: 12px 0; }}
+        </style>
+        {html}
+        '''
+        self.ai_response.setHtml(styled_html)
+        self._scroll_to_bottom()
 
     def hide_overlay(self):
         self.response_timer.stop()

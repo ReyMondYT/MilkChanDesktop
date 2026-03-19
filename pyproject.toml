@@ -15,30 +15,36 @@ license = {text = "MIT"}
 keywords = ["ai", "companion", "desktop", "pyqt5", "sentientmilk"]
 
 dependencies = [
-    # Core
-    "python-dotenv>=1.0.1",
-    "requests>=2.32.3",
-    
-    # AI / OpenAI
-    "openai>=1.51.2",
-    
-    # Image processing
-    "Pillow>=10.4.0",
-    "opencv-python>=4.9.0.80",
-    "numpy>=1.26.4",
-    "scipy>=1.13.1",
-    
-    # Desktop GUI
-    "PyQt5>=5.15.10",
-    
-    # Screen capture
-    "mss>=9.0.1",
-    
-    # Audio
-    "soundcard>=0.4.3",
-    
-    # Desktop Automation
-    "pyautogui>=0.9.54",
+# Core
+"python-dotenv>=1.0.1",
+"requests>=2.32.3",
+
+# AI / OpenAI
+"openai>=1.51.2",
+
+# Image processing
+"Pillow>=10.4.0",
+"opencv-python>=4.9.0.80",
+"numpy>=1.26.4",
+"scipy>=1.13.1",
+
+# Desktop GUI
+"PyQt5>=5.15.10",
+
+# Screen capture
+"mss>=9.0.1",
+
+# Audio
+"soundcard>=0.4.3",
+
+# Desktop Automation
+"pyautogui>=0.9.54",
+
+# Markdown rendering
+"markdown2>=2.5.0",
+
+# Terminal rich console
+"rich>=13.0.0",
 ]
 
 [project.optional-dependencies]

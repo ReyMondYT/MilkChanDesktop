@@ -4,7 +4,7 @@ import sys
 import time
 
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QAbstractNativeEventFilter, QCoreApplication
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QAbstractNativeEventFilter, QCoreApplication, pyqtSlot
 from PyQt5.QtWidgets import QMainWindow, QLabel, QMenu, QMessageBox, QApplication
 from PyQt5.QtGui import QImage, QPixmap
 
@@ -27,6 +27,7 @@ from milkchan.desktop.agents.agent_workers import (
     SemanticProactiveWorker,
 )
 from milkchan.desktop.utils.screen_watcher import ScreenWatcher
+from milkchan.desktop.services.ipc_server import get_ipc_server
 from milkchan.bootstrap import get_assets_dir, is_cache_valid
 
 ASSETS_DIR = str(get_assets_dir())
@@ -173,8 +174,17 @@ class SpriteWindow(QMainWindow):
 
         self.schedule_next_blink()
         self.schedule_proactive_message()
+
+        # Start IPC server for terminal chat
+        ipc_server = get_ipc_server()
+        ipc_server.set_sprite_window(self)
+        ipc_server.start()
     
     def __del__(self):
+        try:
+            get_ipc_server().stop()
+        except Exception:
+            pass
         try:
             self.background_recorder.stop_recording()
         except Exception:
@@ -411,6 +421,14 @@ class SpriteWindow(QMainWindow):
         self.chat_overlay.handle_response(response, emotion)
         self.schedule_proactive_message()
 
+    @pyqtSlot()
+    def _apply_pending_emotion(self):
+        """Apply pending emotion from IPC call (thread-safe)"""
+        emotion = getattr(self, '_pending_emotion', None)
+        if emotion:
+            self.update_sprite_emotion(emotion)
+            self._pending_emotion = None
+
     def update_sprite_emotion(self, emotion_data: list):
         # Validate and coerce emotion to the nearest available sprite
         try:
@@ -503,11 +521,13 @@ class SpriteWindow(QMainWindow):
         self.mouth_state = 2 if self.mouth_state == 0 else 0
         self.update_sprite()
 
+    @pyqtSlot()
     def start_speech_animation(self):
         self.is_speaking = True
         interval = max(100, int(self.chat_overlay.char_delay * 2.0))
         self.mouth_timer.start(interval)
 
+    @pyqtSlot()
     def stop_speech_animation(self):
         self.mouth_timer.stop()
         self.is_speaking = False
