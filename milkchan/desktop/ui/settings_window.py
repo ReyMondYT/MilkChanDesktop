@@ -84,9 +84,11 @@ class SettingsWindow(QDialog):
         self.desktop_tab = DesktopTab(self.original_config)
         self.vision_tab = VisionTab(self.original_config)
         self.proactive_tab = ProactiveTab(self.original_config)
+        self.tools_tab = ToolsTab(self.original_config)
 
         # Add tabs
         self.tabs.addTab(self.api_tab, '🔑 API Config')
+        self.tabs.addTab(self.tools_tab, '🔧 Tools')
         self.tabs.addTab(self.desktop_tab, '🖥️ Desktop')
         self.tabs.addTab(self.vision_tab, '👁️ Vision')
         self.tabs.addTab(self.proactive_tab, '⚡ Proactive')
@@ -250,16 +252,18 @@ QPushButton:pressed {{
         self.desktop_tab.load_values(cfg)
         self.vision_tab.load_values(cfg)
         self.proactive_tab.load_values(cfg)
+        self.tools_tab.load_values(cfg)
 
     def _on_save(self):
         cfg = copy.deepcopy(self.original_config)
-        
+
         # Merge settings from all tabs
         self.api_tab.save_values(cfg)
         self.desktop_tab.save_values(cfg)
         self.vision_tab.save_values(cfg)
         self.proactive_tab.save_values(cfg)
-        
+        self.tools_tab.save_values(cfg)
+
         self.result_config = cfg
         self.result_persona = self.persona_edit.toPlainText().strip()
         self.accept()
@@ -696,3 +700,40 @@ class ProactiveTab(QWidget):
         cfg['proactive']['sample_interval_ms'] = int(self.interval_spin.value())
         cfg['proactive']['change_threshold'] = float(self.threshold_spin.value())
         cfg['proactive']['min_interval_sec'] = float(self.min_interval_spin.value())
+
+
+class ToolsTab(QWidget):
+    """SentientMilk Tools Configuration Tab"""
+    def __init__(self, config: dict):
+        super().__init__()
+        self.config = config
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setFormAlignment(Qt.AlignLeft)
+        form.setSpacing(10)
+
+        # Web Search Token
+        self.web_search_token_edit = QLineEdit()
+        self.web_search_token_edit.setPlaceholderText('Enter web search API token...')
+        self.web_search_token_edit.setEchoMode(QLineEdit.Password)
+        form.addRow('Web Search Token:', self.web_search_token_edit)
+
+        layout.addLayout(form)
+        layout.addStretch()
+
+    def load_values(self, cfg: dict):
+        tools = cfg.get('tools', {})
+        self.web_search_token_edit.setText(tools.get('web_search_token', ''))
+
+    def save_values(self, cfg: dict):
+        web_search_token = self.web_search_token_edit.text().strip()
+        cfg.setdefault('tools', {})
+        if web_search_token:
+            cfg['tools']['web_search_token'] = web_search_token

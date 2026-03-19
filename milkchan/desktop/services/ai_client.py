@@ -10,6 +10,7 @@ import sys
 import time
 import json
 import logging
+import importlib
 from typing import List, Optional, Tuple, Dict, Any
 from pathlib import Path
 
@@ -19,6 +20,39 @@ _config = None
 _llm = None
 _persona_cache = None
 _last_emotion: Dict[str, Any] = {}
+
+
+def _clear_sentientmilk_modules():
+    """Remove previously loaded sentientmilk_framework modules to force reload."""
+    to_remove = [name for name in sys.modules if name == 'sentientmilk_framework' or name.startswith('sentientmilk_framework.')]
+    for name in to_remove:
+        sys.modules.pop(name, None)
+
+def _load_framework_from_user_data() -> Tuple[Optional[Any], Optional[Any]]:
+    """Attempt to load sentientmilk_framework from the writable user data folder."""
+    try:
+        from milkchan.bootstrap import get_user_data_dir
+        user_framework = get_user_data_dir() / "sentientmilk_framework"
+        init_path = user_framework / "__init__.py"
+        if not init_path.exists():
+            return None, None
+
+        _clear_sentientmilk_modules()
+
+        framework_parent = str(user_framework.parent)
+        if framework_parent not in sys.path:
+            sys.path.insert(0, framework_parent)
+
+        framework_module = importlib.import_module("sentientmilk_framework")
+        LLM = getattr(framework_module, "LLM", None)
+        Settings = getattr(framework_module, "Settings", None)
+        if LLM and Settings:
+            logger.info(f"Using updated framework from: {user_framework}")
+            return LLM, Settings
+    except Exception as exc:
+        logger.error(f"Failed loading user framework override: {exc}")
+    return None, None
+
 
 def _get_config():
     """Get cached config instance"""
@@ -67,59 +101,39 @@ def reload_config():
 def _get_llm():
     """Get or create SentientMilk LLM instance"""
     global _llm
-    
+
     if _llm is None:
         config = _get_config()
-        
+
         api_key = config.openai_api_key
         base_url = config.openai_base_url
         model = config.openai_chat_model
-        
+
         if not api_key or not base_url or not model:
             raise ValueError("API credentials not configured")
-        
-        # Check for updated framework in user data (for bundled EXE updates)
-        LLM = None
-        Settings = None
-        
-        if getattr(sys, 'frozen', False):
-            from milkchan.bootstrap import get_user_data_dir
-            user_framework = get_user_data_dir() / "sentientmilk_framework"
-            if user_framework.exists() and (user_framework / "ai.py").exists():
-                # Import directly from user data using importlib
-                import importlib.util
-                
-                # Load __init__.py first to set up the package
-                init_path = user_framework / "__init__.py"
-                spec = importlib.util.spec_from_file_location("sentientmilk_framework", init_path)
-                if spec and spec.loader:
-                    framework_module = importlib.util.module_from_spec(spec)
-                    sys.modules['sentientmilk_framework'] = framework_module
-                    spec.loader.exec_module(framework_module)
-                    LLM = framework_module.LLM
-                    Settings = framework_module.Settings
-                    logger.info(f"Using updated framework from: {user_framework}")
-        
-        if LLM is None:
+
+        # Always prefer user-data override so dev and bundled behave the same
+        LLM, Settings = _load_framework_from_user_data()
+
+        if LLM is None or Settings is None:
             # Use bundled framework
             from milkchan.sentientmilk_framework import LLM, Settings
-        
-        # Find custom_tools path (works in both dev and bundled mode)
-        if getattr(sys, 'frozen', False):
-            # PyInstaller bundled - check user data first for updates
-            from milkchan.bootstrap import get_user_data_dir
-            user_tools = get_user_data_dir() / "custom_tools"
-            if user_tools.exists():
-                custom_tools_path = user_tools
-            else:
+
+        # Find custom_tools path (prefer user data in both modes)
+        from milkchan.bootstrap import get_user_data_dir
+        user_tools = get_user_data_dir() / "custom_tools"
+        if user_tools.exists():
+            custom_tools_path = user_tools
+        else:
+            if getattr(sys, 'frozen', False):
                 meipass = getattr(sys, '_MEIPASS', '.')
                 custom_tools_path = Path(meipass) / "milkchan" / "custom_tools"
-        else:
-            # Development
-            custom_tools_path = Path(__file__).parent.parent.parent / "custom_tools"
-        
+            else:
+                # Development fallback to repo tools
+                custom_tools_path = Path(__file__).parent.parent.parent / "custom_tools"
+
         persona = _get_persona()
-        
+
         milkchan_persona = f"""
 Name: Milk Chan
 {persona}
@@ -130,28 +144,30 @@ Name: Milk Chan
 3. Do not use emojis or emoticons in your response.
 4. Match your sprite emotion to your reply CONTENT using the update_sprite.
 5. Don't write long messages, 2-3 sentences is maximum.
-6. You have access to tools like memory, take_screenshot, read, write, edit, delete, and exec.
-7. Use tools autonomously to help the user without asking for permission.
+6. Use tools autonomously to help the user without asking for permission.
 """
-        
+
         settings = Settings(
             persona=milkchan_persona,
             custom_tools_path=str(custom_tools_path)
         )
-        
+
+        web_search_token = config.get('tools.web_search_token', '')
+
         _llm = LLM(
             api_key=api_key,
             base_url=base_url,
             model=model,
             settings=settings,
             request_timeout=(15.0, 180.0),
-            tool_event_handler=_tool_event_handler
+            tool_event_handler=_tool_event_handler,
+            web_search_token=web_search_token if web_search_token else None
         )
-        
+
         # Set the callback on the dynamically loaded module instance
         if 'update_sprite' in _llm._loaded_tools:
             _llm._loaded_tools['update_sprite']._sprite_callback = _sprite_update_callback
-    
+
     return _llm
 
 _last_sprite_update = None
@@ -189,23 +205,6 @@ def chat_respond(
     video_path: Optional[str] = None,
     timeout_sec: Optional[float] = None
 ) -> Tuple[str, Optional[dict]]:
-    """
-    Send a message to the AI and get response with emotion.
-    
-    Uses SentientMilk framework for AI interaction with tool support.
-    
-    Args:
-        user_message: User's message
-        persona_description: Override persona (uses cached persona if not provided)
-        history: Conversation history
-        username: User's name
-        image_path: Optional image path for vision
-        video_path: Optional video path (not yet implemented)
-        timeout_sec: Optional timeout
-        
-    Returns:
-        Tuple of (response_text, emotion_dict)
-    """
     global _last_emotion, _last_sprite_update
     
     t0 = time.perf_counter()

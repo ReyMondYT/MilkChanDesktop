@@ -33,8 +33,8 @@ class Config:
         """Load configuration from file"""
         default_config = {
             "position": {"x_offset": 0, "y_offset": 0},
-            "scale_factor": 100,
-            "font_size": 6,
+"scale_factor": 100,
+        "font_size": 24,
             "char_delay_ms": 50,
             "username": os.getenv("USERNAME") or getuser() or "User",
             "sprite_resolution_scale": 1.0,
@@ -66,15 +66,18 @@ class Config:
                 "min_change_percent": 6.0,
                 "highlight_score_threshold": 0.55,
             },
-            "updates": {
-                "auto_check": True,
-                "auto_update": False,
-                "check_interval_hours": 24,
-                "github_repo": "obezbolen67/SentientMilk",
-                "branch": "master",
-                "github_token": "",
-            },
-        }
+"updates": {
+            "auto_check": True,
+            "auto_update": False,
+            "check_interval_hours": 24,
+            "github_repo": "obezbolen67/SentientMilk",
+            "branch": "master",
+            "github_token": "",
+        },
+        "tools": {
+            "web_search_token": "",
+        },
+    }
 
         config_file = Path(self.config_path)
         if not config_file.exists():
