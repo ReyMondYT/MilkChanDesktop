@@ -10,6 +10,7 @@ import sys
 import json
 import os
 import socket
+import time
 from pathlib import Path
 
 IPC_PORT = 19527
@@ -97,6 +98,32 @@ def display_history(history: list):
             console.print()
 
 
+def stream_response(response: str, emotion: dict, char_delay: float = 0.03):
+    """Stream response character by character, synced with MilkChan speech"""
+    
+    # Send emotion update and start speech
+    if emotion:
+        send_to_milkchan('stream_start', {'emotion': emotion})
+    
+    # Start speech animation
+    send_to_milkchan('start_speech')
+    
+    # Stream text with typewriter effect
+    displayed = ""
+    console.print()
+    console.print("[bold magenta]Milk Chan:[/bold magenta] ", end="")
+    
+    for char in response:
+        displayed += char
+        console.print(char, end="", soft_wrap=True)
+        time.sleep(char_delay)
+    
+    console.print()  # New line at end
+    
+    # End streaming
+    send_to_milkchan('stream_end')
+
+
 def main():
     if len(sys.argv) < 2:
         console.print("[red]Error: No history file provided[/red]")
@@ -114,22 +141,35 @@ def main():
 
     display_history(history)
 
+    # Notify MilkChan that TUI is active
+    send_to_milkchan('tui_start')
+
     console.print("[dim]Type your message and press Enter. Type 'exit' or 'quit' to close.[/dim]")
     console.print()
 
     # Start shutdown watcher thread
     import threading
+    import os
+    import signal
     shutdown_event = threading.Event()
 
     def watch_for_shutdown():
         import time
+        import sys
         while not shutdown_event.is_set():
             result = send_to_milkchan('ping')
             if 'error' in result:
                 shutdown_event.set()
-                console.print("\n[red]MilkChan closed. Exiting...[/red]")
-                break
-            time.sleep(1)
+                console.print("\n[red]MilkChan closed. Killing terminal...[/red]")
+                # Kill the terminal process
+                if os.name == 'nt':
+                    # On Windows, kill the cmd process
+                    os.system('taskkill /f /im cmd.exe')
+                else:
+                    # On Unix, kill the terminal
+                    os.kill(os.getppid(), signal.SIGTERM)
+                os._exit(0)
+            time.sleep(0.5)
 
     watcher_thread = threading.Thread(target=watch_for_shutdown, daemon=True)
     watcher_thread.start()
@@ -172,27 +212,29 @@ def main():
             response = result.get('response', '')
             emotion = result.get('emotion')
 
-            history.append({'role': 'assistant', 'content': response})
+            # Clear "Thinking..." line by printing control sequences directly
+            console.file.write('\x1b[1A\x1b[2K')
+            console.file.flush()
+            stream_response(response, emotion, char_delay=0.025)
 
-            console.print()
-            md = Markdown(response)
-            console.print(md)
+            history.append({'role': 'assistant', 'content': response})
 
             if emotion:
                 console.print(f"[dim]Emotion: {emotion.get('emotion', [])}[/dim]")
-
             console.print()
 
         except KeyboardInterrupt:
             console.print("\n[bold red]Interrupted. Saving history...[/bold red]")
             save_history(history_file, history)
+            send_to_milkchan('stream_end')
             break
         except EOFError:
             save_history(history_file, history)
+            send_to_milkchan('stream_end')
             break
 
     shutdown_event.set()
-    # Stop speech animation when closing
+    send_to_milkchan('tui_end')
     send_to_milkchan('stop_speech')
     console.print("[green]History saved. You can close this terminal.[/green]")
     try:

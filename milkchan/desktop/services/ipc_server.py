@@ -9,6 +9,7 @@ import json
 import socket
 import threading
 import logging
+import time
 from typing import Callable, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ class IPCServer:
         self.handlers: Dict[str, Callable] = {}
         self._thread: Optional[threading.Thread] = None
         self.sprite_window = None
+        self._stream_thread: Optional[threading.Thread] = None
+        self._tui_active = False  # Track if TUI terminal is active
 
     def register_handler(self, command: str, handler: Callable):
         self.handlers[command] = handler
@@ -71,7 +74,7 @@ class IPCServer:
 
     def _handle_client(self, conn: socket.socket):
         try:
-            conn.settimeout(30.0)
+            conn.settimeout(120.0)
             data = b''
             while True:
                 chunk = conn.recv(4096)
@@ -83,7 +86,7 @@ class IPCServer:
 
             if data:
                 message = json.loads(data.decode('utf-8').strip())
-                response = self._process_message(message)
+                response = self._process_message(message, conn)
                 conn.sendall((json.dumps(response) + '\n').encode('utf-8'))
         except Exception as e:
             logger.error(f"Client handler error: {e}")
@@ -94,7 +97,7 @@ class IPCServer:
         finally:
             conn.close()
 
-    def _process_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_message(self, message: Dict[str, Any], conn: socket.socket = None) -> Dict[str, Any]:
         command = message.get('command', '')
         params = message.get('params', {})
 
@@ -104,8 +107,25 @@ class IPCServer:
         if command == 'shutdown':
             return {'status': 'ok', 'message': 'shutting_down'}
 
+        if command == 'tui_start':
+            self._tui_active = True
+            return {'status': 'ok'}
+
+        if command == 'tui_end':
+            self._tui_active = False
+            return {'status': 'ok'}
+
         if command == 'chat':
             return self._handle_chat(params)
+
+        if command == 'stream_start':
+            return self._handle_stream_start(params)
+
+        if command == 'stream_text':
+            return self._handle_stream_text(params)
+
+        if command == 'stream_end':
+            return self._handle_stream_end()
 
         if command == 'update_emotion':
             return self._handle_emotion(params)
@@ -123,36 +143,51 @@ class IPCServer:
 
     def _handle_chat(self, params: Dict[str, Any]) -> Dict[str, Any]:
         from milkchan.desktop.services import ai_client
+        from milkchan.core.config import load_config
 
         user_message = params.get('message', '')
         history = params.get('history', [])
         username = params.get('username', 'User')
 
         try:
+            # Take screenshot for vision context (like chatbox does)
+            config = load_config()
+            processing = config.get('processing', {})
+            vision_mode = processing.get('vision_mode', 'image')
+            ss_when_disabled = processing.get('screenshot_on_disabled_vision', True)
+            
+            screenshot_path = None
+            should_screenshot = bool(user_message) and (
+                vision_mode in ('video', 'image') or
+                (not processing.get('vision_enabled', True) and ss_when_disabled)
+            )
+            
+            if should_screenshot:
+                try:
+                    from milkchan.desktop.utils.screenshot import take_screenshot
+                    rf = float(processing.get('video_resize_factor', 0.35))
+                    ss = take_screenshot(rf)
+                    if ss:
+                        screenshot_path, width, height = ss
+                        logger.info(f"[IPC] screenshot: {screenshot_path} ({width}x{height})")
+                except Exception as e:
+                    logger.warning(f"[IPC] screenshot failed: {e}")
+
             response, emotion = ai_client.chat_respond(
                 user_message=user_message,
                 history=history,
-                username=username
+                username=username,
+                image_path=screenshot_path
             )
 
-            if emotion and self.sprite_window:
+            # Cleanup screenshot
+            if screenshot_path:
                 try:
-                    from PyQt5.QtCore import QMetaObject, Qt, Q_ARG
-                    emotion_data = emotion.get('emotion', [])
-                    if emotion_data:
-                        self.sprite_window._pending_emotion = emotion_data
-                        QMetaObject.invokeMethod(
-                            self.sprite_window,
-                            '_apply_pending_emotion',
-                            Qt.QueuedConnection
-                        )
-                        QMetaObject.invokeMethod(
-                            self.sprite_window,
-                            'start_speech_animation',
-                            Qt.QueuedConnection
-                        )
-                except Exception as e:
-                    logger.warning(f"Could not update sprite: {e}")
+                    import os
+                    if os.path.exists(screenshot_path):
+                        os.remove(screenshot_path)
+                except Exception:
+                    pass
 
             return {
                 'status': 'ok',
@@ -161,6 +196,45 @@ class IPCServer:
             }
         except Exception as e:
             return {'error': str(e)}
+
+    def _handle_stream_start(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Initialize streaming with emotion"""
+        emotion = params.get('emotion', {})
+        if emotion and self.sprite_window:
+            emotion_data = emotion.get('emotion', [])
+            if emotion_data:
+                self.sprite_window._pending_emotion = emotion_data
+                self._invoke_on_main_thread('_apply_pending_emotion')
+        return {'status': 'ok'}
+
+    def _handle_stream_text(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Stream text chunk - update speech animation"""
+        text = params.get('text', '')
+        is_final = params.get('final', False)
+        
+        if self.sprite_window:
+            self._invoke_on_main_thread('start_speech_animation')
+        
+        return {'status': 'ok', 'received': len(text)}
+
+    def _handle_stream_end(self) -> Dict[str, Any]:
+        """End streaming - stop speech animation"""
+        if self.sprite_window:
+            self._invoke_on_main_thread('stop_speech_animation')
+        return {'status': 'ok'}
+
+    def _invoke_on_main_thread(self, method_name: str):
+        """Safely invoke a method on the sprite window from background thread"""
+        if self.sprite_window:
+            try:
+                from PyQt5.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(
+                    self.sprite_window,
+                    method_name,
+                    Qt.QueuedConnection
+                )
+            except Exception as e:
+                logger.warning(f"Could not invoke {method_name}: {e}")
 
     def _handle_emotion(self, params: Dict[str, Any]) -> Dict[str, Any]:
         emotion = params.get('emotion', [])
@@ -179,32 +253,17 @@ class IPCServer:
         return {'error': 'No sprite window or emotion'}
 
     def _handle_start_speech(self) -> Dict[str, Any]:
-        if self.sprite_window:
-            try:
-                from PyQt5.QtCore import QMetaObject, Qt
-                QMetaObject.invokeMethod(
-                    self.sprite_window,
-                    'start_speech_animation',
-                    Qt.QueuedConnection
-                )
-                return {'status': 'ok'}
-            except Exception as e:
-                return {'error': str(e)}
-        return {'error': 'No sprite window'}
+        self._invoke_on_main_thread('start_speech_animation')
+        return {'status': 'ok'}
 
     def _handle_stop_speech(self) -> Dict[str, Any]:
-        if self.sprite_window:
-            try:
-                from PyQt5.QtCore import QMetaObject, Qt
-                QMetaObject.invokeMethod(
-                    self.sprite_window,
-                    'stop_speech_animation',
-                    Qt.QueuedConnection
-                )
-                return {'status': 'ok'}
-            except Exception as e:
-                return {'error': str(e)}
-        return {'error': 'No sprite window'}
+        self._invoke_on_main_thread('stop_speech_animation')
+        return {'status': 'ok'}
+
+
+    def is_tui_active(self) -> bool:
+        """Check if TUI terminal is currently active"""
+        return self._tui_active
 
 
 _ipc_server: Optional[IPCServer] = None

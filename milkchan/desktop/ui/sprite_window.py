@@ -393,7 +393,14 @@ class SpriteWindow(QMainWindow):
             print("[SpriteWindow] proactive skipped: user typing")
             self.schedule_proactive_message()
             return
-        
+        # Skip if TUI terminal is active
+        from milkchan.desktop.services.ipc_server import get_ipc_server
+        ipc = get_ipc_server()
+        if ipc.is_tui_active():
+            print("[SpriteWindow] proactive skipped: TUI active")
+            self.schedule_proactive_message()
+            return
+
         self.thinking = True
         self.update_sprite()
         self.proactive_worker = ProactiveMessageWorker(self.background_recorder)
@@ -526,6 +533,13 @@ class SpriteWindow(QMainWindow):
         self.is_speaking = True
         interval = max(100, int(self.chat_overlay.char_delay * 2.0))
         self.mouth_timer.start(interval)
+        # Play narration audio if available
+        try:
+            if hasattr(self.chat_overlay, 'audio_player'):
+                self.chat_overlay.audio_player.stop()
+                self.chat_overlay.audio_player.play()
+        except Exception:
+            pass
 
     @pyqtSlot()
     def stop_speech_animation(self):
@@ -533,6 +547,12 @@ class SpriteWindow(QMainWindow):
         self.is_speaking = False
         self.mouth_state = 0
         self.update_sprite()
+        # Stop narration audio
+        try:
+            if hasattr(self.chat_overlay, 'audio_player'):
+                self.chat_overlay.audio_player.stop()
+        except Exception:
+            pass
 
     def start_blink(self):
         self.is_blinking = True
