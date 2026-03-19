@@ -79,17 +79,30 @@ def _get_llm():
             raise ValueError("API credentials not configured")
         
         # Check for updated framework in user data (for bundled EXE updates)
+        LLM = None
+        Settings = None
+        
         if getattr(sys, 'frozen', False):
             from milkchan.bootstrap import get_user_data_dir
             user_framework = get_user_data_dir() / "sentientmilk_framework"
             if user_framework.exists() and (user_framework / "ai.py").exists():
-                # Add to sys.path so imports use the updated version
-                user_framework_str = str(user_framework.parent)
-                if user_framework_str not in sys.path:
-                    sys.path.insert(0, user_framework_str)
+                # Import directly from user data using importlib
+                import importlib.util
+                
+                # Load __init__.py first to set up the package
+                init_path = user_framework / "__init__.py"
+                spec = importlib.util.spec_from_file_location("sentientmilk_framework", init_path)
+                if spec and spec.loader:
+                    framework_module = importlib.util.module_from_spec(spec)
+                    sys.modules['sentientmilk_framework'] = framework_module
+                    spec.loader.exec_module(framework_module)
+                    LLM = framework_module.LLM
+                    Settings = framework_module.Settings
                     logger.info(f"Using updated framework from: {user_framework}")
         
-        from milkchan.sentientmilk_framework import LLM, Settings
+        if LLM is None:
+            # Use bundled framework
+            from milkchan.sentientmilk_framework import LLM, Settings
         
         # Find custom_tools path (works in both dev and bundled mode)
         if getattr(sys, 'frozen', False):
