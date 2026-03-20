@@ -432,12 +432,37 @@ def display_tool_event(event: Dict[str, Any]):
 
 
 def display_assistant_response(response: str, emotion: dict):
-    """Display assistant response."""
+    """Display assistant response with typing animation and mouth sync."""
     console.print("[bold magenta]Milk Chan:[/bold magenta]")
     
     if response and response.strip():
-        md = Markdown(response)
+        # Start speech animation via IPC
+        send_to_milkchan('start_speech')
+        
+        # Stream the response with typing effect
+        if emotion:
+            send_to_milkchan('stream_start', {'emotion': emotion})
+        
+        # Character-by-character streaming for typing effect
+        char_delay = 0.02  # 20ms per character
+        displayed = ""
+        
+        for char in response:
+            displayed += char
+            md = Markdown(displayed)
+            console.print(md, end='')
+            console.file.write('\x1b[1A')  # Move cursor up
+            console.file.flush()
+            time.sleep(char_delay)
+        
+        # Final render
+        console.file.write('\x1b[0J')  # Clear to end of line
+        console.file.flush()
+        md = Markdown(displayed)
         console.print(md)
+        
+        # End speech animation
+        send_to_milkchan('stream_end')
     else:
         console.print("[dim italic](No response)[/dim italic]")
     
@@ -482,14 +507,23 @@ def main():
         if tool_name in ('update_sprite', 'reset_sprite_state'):
             return
         
-        # Create unique identifier for this tool call
+        # Create unique identifier for this tool call (name + args only)
+        # Don't include event_type so start+end are tracked together
         args_str = str(sorted(data.get('arguments', {}).items()))
-        tool_hash = f"{tool_name}:{args_str}:{event_type}"
+        tool_hash = f"{tool_name}:{args_str}"
         
-        # Only display if not already shown
-        if tool_hash not in displayed_tools:
-            displayed_tools.add(tool_hash)
-            display_tool_event(event)
+        # For tool_end events, check if we already showed this tool completing
+        if event_type == 'tool_end':
+            completion_hash = f"{tool_hash}:completed"
+            if completion_hash in displayed_tools:
+                return  # Already showed completion
+            displayed_tools.add(completion_hash)
+        
+        # For tool_start, just mark that we showed it starting
+        if event_type == 'tool_start':
+            displayed_tools.add(f"{tool_hash}:started")
+        
+        display_tool_event(event)
     
     # Create stream client for real-time tool events
     stream_config = StreamConfig(port=stream_port)
@@ -617,7 +651,7 @@ def main():
                     display_tool_event({'type': 'tool_end', 'data': tool})
                     displayed_tools.add(tool_hash)
             
-            # Display assistant response
+            # Display assistant response with typing animation
             display_assistant_response(response, emotion)
 
             # Add assistant response to history
