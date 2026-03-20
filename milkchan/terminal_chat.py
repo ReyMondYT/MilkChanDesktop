@@ -67,15 +67,31 @@ def send_to_milkchan(command: str, params: dict = None) -> dict:
 
 
 def load_history(history_file: str) -> list:
+    # First try to load from MilkChan database via IPC
+    result = send_to_milkchan('get_history')
+    if result.get('status') == 'ok' and result.get('history'):
+        history = result['history']
+        if history:
+            print(f"[TUI] Loaded {len(history)} messages from database")
+            return history
+    
+    # Fallback to history file
     if os.path.exists(history_file):
         with open(history_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            history = json.load(f)
+            if history:
+                print(f"[TUI] Loaded {len(history)} messages from file")
+            return history
+    print("[TUI] No history found, starting fresh")
     return []
 
 
 def save_history(history_file: str, history: list):
+    # Save to history file
     with open(history_file, 'w', encoding='utf-8') as f:
         json.dump(history, f, indent=2)
+    # Also sync to MilkChan database
+    send_to_milkchan('update_history', {'history': history})
 
 
 def display_history(history: list):
@@ -152,22 +168,25 @@ def main():
     import os
     import signal
     shutdown_event = threading.Event()
+    
+    # Store the parent PID (the cmd/terminal process that spawned this Python script)
+    terminal_pid = os.getppid()
 
     def watch_for_shutdown():
         import time
-        import sys
         while not shutdown_event.is_set():
             result = send_to_milkchan('ping')
             if 'error' in result:
                 shutdown_event.set()
-                console.print("\n[red]MilkChan closed. Killing terminal...[/red]")
-                # Kill the terminal process
-                if os.name == 'nt':
-                    # On Windows, kill the cmd process
-                    os.system('taskkill /f /im cmd.exe')
-                else:
-                    # On Unix, kill the terminal
-                    os.kill(os.getppid(), signal.SIGTERM)
+                console.print("\n[red]MilkChan closed. Closing terminal...[/red]")
+                # Kill only the specific terminal process
+                try:
+                    if os.name == 'nt':
+                        os.system(f'taskkill /f /pid {terminal_pid}')
+                    else:
+                        os.kill(terminal_pid, signal.SIGTERM)
+                except Exception:
+                    pass
                 os._exit(0)
             time.sleep(0.5)
 

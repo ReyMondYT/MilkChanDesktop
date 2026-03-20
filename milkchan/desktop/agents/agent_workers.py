@@ -76,6 +76,7 @@ def send_message(message: str, video_filepath: Optional[str] = None) -> Tuple[st
     history.append({'role': 'user', 'content': message})
     history.append({'role': 'assistant', 'content': model_message})
     memory_client.update_history(history)
+    print(f"[send_message] saved {len(history)} messages to history")
 
     if video_filepath and os.path.exists(video_filepath):
         try:

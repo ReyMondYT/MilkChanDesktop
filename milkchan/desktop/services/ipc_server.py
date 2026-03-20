@@ -136,13 +136,19 @@ class IPCServer:
         if command == 'stop_speech':
             return self._handle_stop_speech()
 
+        if command == 'get_history':
+            return self._handle_get_history()
+
+        if command == 'update_history':
+            return self._handle_update_history(params)
+
         if command in self.handlers:
             return self.handlers[command](params)
 
         return {'error': f'Unknown command: {command}'}
 
     def _handle_chat(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        from milkchan.desktop.services import ai_client
+        from milkchan.desktop.services import ai_client, memory_client
         from milkchan.core.config import load_config
 
         user_message = params.get('message', '')
@@ -155,13 +161,13 @@ class IPCServer:
             processing = config.get('processing', {})
             vision_mode = processing.get('vision_mode', 'image')
             ss_when_disabled = processing.get('screenshot_on_disabled_vision', True)
-            
+
             screenshot_path = None
             should_screenshot = bool(user_message) and (
                 vision_mode in ('video', 'image') or
                 (not processing.get('vision_enabled', True) and ss_when_disabled)
             )
-            
+
             if should_screenshot:
                 try:
                     from milkchan.desktop.utils.screenshot import take_screenshot
@@ -179,6 +185,12 @@ class IPCServer:
                 username=username,
                 image_path=screenshot_path
             )
+
+            # Save to database
+            history.append({'role': 'user', 'content': user_message})
+            history.append({'role': 'assistant', 'content': response})
+            memory_client.update_history(history)
+            logger.info(f"[IPC] saved {len(history)} messages to history")
 
             # Cleanup screenshot
             if screenshot_path:
@@ -260,6 +272,24 @@ class IPCServer:
         self._invoke_on_main_thread('stop_speech_animation')
         return {'status': 'ok'}
 
+    def _handle_get_history(self) -> Dict[str, Any]:
+        """Get conversation history from database"""
+        try:
+            from milkchan.desktop.services import memory_client
+            history = memory_client.get_history()
+            return {'status': 'ok', 'history': history}
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _handle_update_history(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Update conversation history in database"""
+        try:
+            from milkchan.desktop.services import memory_client
+            history = params.get('history', [])
+            memory_client.update_history(history)
+            return {'status': 'ok'}
+        except Exception as e:
+            return {'error': str(e)}
 
     def is_tui_active(self) -> bool:
         """Check if TUI terminal is currently active"""
