@@ -3,6 +3,8 @@ IPC Server for MilkChan
 
 Provides a local socket server for external processes (like terminal_chat)
 to communicate with the main MilkChan application.
+
+Supports scalable streaming with queues for real-time updates.
 """
 
 import json
@@ -10,11 +12,58 @@ import socket
 import threading
 import logging
 import time
-from typing import Callable, Dict, Any, Optional
+import queue
+from typing import Callable, Dict, Any, Optional, List
+from collections import defaultdict
+
+from milkchan.desktop.services.stream_broker import StreamEventBroker, EventType
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 19527
+STREAM_PORT = 19528
+
+
+class StreamQueue:
+    """Legacy queue for backward compatibility."""
+    
+    def __init__(self, maxsize: int = 100):
+        self._queue = queue.Queue(maxsize=maxsize)
+        self._active = False
+        self._lock = threading.Lock()
+        
+    def start(self):
+        with self._lock:
+            self._active = True
+            while not self._queue.empty():
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+    
+    def stop(self):
+        with self._lock:
+            self._active = False
+    
+    def put(self, event: Dict[str, Any], block: bool = False, timeout: float = 0.1) -> bool:
+        with self._lock:
+            if not self._active:
+                return False
+        try:
+            self._queue.put(event, block=block, timeout=timeout)
+            return True
+        except queue.Full:
+            return False
+    
+    def get(self, block: bool = True, timeout: float = 0.1) -> Optional[Dict[str, Any]]:
+        try:
+            return self._queue.get(block=block, timeout=timeout)
+        except queue.Empty:
+            return None
+    
+    def is_active(self) -> bool:
+        with self._lock:
+            return self._active
 
 
 class IPCServer:
@@ -26,13 +75,44 @@ class IPCServer:
         self._thread: Optional[threading.Thread] = None
         self.sprite_window = None
         self._stream_thread: Optional[threading.Thread] = None
-        self._tui_active = False  # Track if TUI terminal is active
+        self._tui_active = False
+        
+        # Scalable streaming infrastructure
+        self._tool_stream_queue = StreamQueue(maxsize=100)
+        
+        # Event broker for real-time streaming
+        self._broker = StreamEventBroker(port=STREAM_PORT, max_subscribers=10)
 
     def register_handler(self, command: str, handler: Callable):
         self.handlers[command] = handler
 
     def set_sprite_window(self, sprite_window):
         self.sprite_window = sprite_window
+        # Register IPC server as tool event callback
+        try:
+            from milkchan.desktop.services import ai_client
+            ai_client.set_tool_event_callback(self._on_tool_event)
+            logger.info("[IPC] Registered as tool event callback")
+        except Exception as e:
+            logger.warning(f"[IPC] Failed to register tool event callback: {e}")
+    
+    def _on_tool_event(self, event: Dict[str, Any]):
+        """Callback for real-time tool events from ai_client."""
+        # Filter out internal tools like update_sprite
+        if event.get('tool_name') == 'update_sprite':
+            return
+        
+        # Map event type to broker event type
+        event_type_str = event.get('type', 'tool_end')
+        if event_type_str == 'tool_start':
+            broker_type = EventType.TOOL_START
+        elif event_type_str == 'tool_error':
+            broker_type = EventType.TOOL_ERROR
+        else:
+            broker_type = EventType.TOOL_END
+        
+        # Publish to broker for real-time streaming
+        self._broker.publish(broker_type, event)
 
     def start(self):
         if self.running:
@@ -41,10 +121,19 @@ class IPCServer:
         self.running = True
         self._thread = threading.Thread(target=self._run_server, daemon=True)
         self._thread.start()
+        
+        # Start the streaming broker
+        self._broker.start()
+        
         logger.info(f"IPC server started on port {self.port}")
+        logger.info(f"Stream broker started on port {STREAM_PORT}")
 
     def stop(self):
         self.running = False
+        
+        # Stop the broker
+        self._broker.stop()
+        
         if self.server_socket:
             try:
                 self.server_socket.close()
@@ -109,7 +198,7 @@ class IPCServer:
 
         if command == 'tui_start':
             self._tui_active = True
-            return {'status': 'ok'}
+            return {'status': 'ok', 'stream_port': STREAM_PORT}
 
         if command == 'tui_end':
             self._tui_active = False
@@ -212,7 +301,8 @@ class IPCServer:
             return {
                 'status': 'ok',
                 'response': response,
-                'emotion': emotion
+                'emotion': emotion,
+                'tools': result.get('tools', [])
             }
         except Exception as e:
             logger.exception(f"[IPC] chat exception: {e}")
@@ -225,6 +315,16 @@ class IPCServer:
                 }
             }
 
+    # === Streaming Infrastructure for Scalable Real-time Updates ===
+    
+    def get_stream_port(self) -> int:
+        """Get the streaming broker port."""
+        return STREAM_PORT
+    
+    def get_broker_stats(self) -> Dict[str, Any]:
+        """Get streaming broker statistics."""
+        return self._broker.get_stats()
+    
     def _handle_stream_start(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Initialize streaming with emotion"""
         emotion = params.get('emotion', {})

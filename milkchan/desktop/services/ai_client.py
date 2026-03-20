@@ -11,7 +11,17 @@ import time
 import json
 import logging
 import importlib
-from typing import List, Optional, Tuple, Dict, Any, TypedDict, Union
+from typing import List, Optional, Tuple, Dict, Any, TypedDict, Union, Callable
+
+
+# Global list to capture tool events during a chat request
+_captured_tools: List[Dict[str, Any]] = []
+
+
+def _clear_captured_tools():
+    """Clear the captured tools list before a new chat request."""
+    global _captured_tools
+    _captured_tools = []
 
 
 class ChatError(TypedDict):
@@ -25,6 +35,7 @@ class ChatResult(TypedDict):
     response: str
     emotion: Optional[dict]
     error: Optional[ChatError]
+    tools: List[Dict[str, Any]]
 
 
 def create_error(error_type: str, message: str, details: Optional[str] = None, http_status: Optional[int] = None) -> ChatError:
@@ -251,17 +262,70 @@ def _sprite_update_callback(pose: str, mood: str, variation: int, expressions: l
     _last_emotion = {'emotion': [pose, mood, variation] + expressions}
     # Note: Emotion is returned via _last_emotion and will be applied when message is displayed
 
+# Callback for streaming tool events to IPC server
+_tool_event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+
+
+def set_tool_event_callback(callback: Optional[Callable[[Dict[str, Any]], None]]):
+    """Set a callback function to receive real-time tool events.
+    
+    This enables streaming tool events to external clients (like TUI).
+    """
+    global _tool_event_callback
+    _tool_event_callback = callback
+
+
+def _emit_tool_event(event: Dict[str, Any]):
+    """Emit tool event to callback if registered."""
+    global _tool_event_callback
+    if _tool_event_callback:
+        try:
+            _tool_event_callback(event)
+        except Exception as e:
+            logger.warning(f"Failed to emit tool event: {e}")
+
+
 def _tool_event_handler(event: Dict[str, Any]):
-    """Handle tool events from SentientMilk framework"""
+    """Handle tool events from SentientMilk framework and capture them for display"""
+    global _captured_tools
     event_type = event.get('type', '')
     tool_name = event.get('tool_name', 'unknown')
     
     if event_type == 'tool_start':
         logger.info(f"[TOOL] Starting: {tool_name} with args: {event.get('arguments', {})}")
+        # Capture tool start event
+        tool_data = {
+            'tool_name': tool_name,
+            'status': 'running',
+            'arguments': event.get('arguments', {}),
+            'result': None,
+            'error': None
+        }
+        _captured_tools.append(tool_data)
+        # Emit for real-time streaming
+        _emit_tool_event({**tool_data, 'type': 'tool_start'})
+        
     elif event_type == 'tool_end':
         logger.info(f"[TOOL] Completed: {tool_name}")
+        # Update the last tool with the result
+        for tool in reversed(_captured_tools):
+            if tool['tool_name'] == tool_name and tool['status'] == 'running':
+                tool['status'] = 'completed'
+                tool['result'] = event.get('result', '')
+                # Emit for real-time streaming
+                _emit_tool_event({**tool, 'type': 'tool_end'})
+                break
+                
     elif event_type == 'tool_error':
         logger.error(f"[TOOL] Error in {tool_name}: {event.get('error', 'unknown')}")
+        # Update the last tool with the error
+        for tool in reversed(_captured_tools):
+            if tool['tool_name'] == tool_name and tool['status'] == 'running':
+                tool['status'] = 'error'
+                tool['error'] = event.get('error', 'unknown')
+                # Emit for real-time streaming
+                _emit_tool_event({**tool, 'type': 'tool_error'})
+                break
 
 def chat_respond(
     user_message: str,
@@ -289,6 +353,7 @@ def chat_respond(
 
     _last_sprite_update = None
     _last_emotion = {}
+    _clear_captured_tools()
 
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     hidden_text = f"--Hidden context: Time: {timestamp} | PC Name: {username or 'User'}--\n{user_message}"
@@ -329,12 +394,38 @@ def chat_respond(
                 return ChatResult(
                     response="",
                     emotion=None,
-                    error=create_error("api_error", "AI returned an error", str(response.get('error')))
+                    error=create_error("api_error", "AI returned an error", str(response.get('error'))),
+                    tools=_captured_tools.copy()
                 )
 
+            # Try multiple response formats
             choices = response.get('choices', [])
-            if choices:
-                reply_text = choices[0].get('message', {}).get('content', '')
+            if choices and isinstance(choices, list):
+                first_choice = choices[0]
+                if isinstance(first_choice, dict):
+                    message = first_choice.get('message', {})
+                    if isinstance(message, dict):
+                        reply_text = message.get('content', '')
+                    else:
+                        reply_text = str(message)
+                else:
+                    reply_text = str(first_choice)
+            
+            # Also check for direct content field
+            if not reply_text:
+                reply_text = response.get('content', '')
+            
+            # Check for text field
+            if not reply_text:
+                reply_text = response.get('text', '')
+            
+            # Check for response field
+            if not reply_text:
+                reply_text = response.get('response', '')
+            
+            # Log raw response for debugging if empty
+            if not reply_text:
+                logger.warning(f"Empty response. Raw response keys: {list(response.keys())}")
 
             if _last_emotion:
                 emotion_obj = _last_emotion
@@ -342,7 +433,7 @@ def chat_respond(
         total_time = time.perf_counter() - t0
         logger.info(f"✓ chat_respond: TOTAL={total_time:.2f}s reply_len={len(reply_text)} has_emotion={bool(emotion_obj)}")
 
-        return ChatResult(response=reply_text.strip(), emotion=emotion_obj, error=None)
+        return ChatResult(response=reply_text.strip(), emotion=emotion_obj, error=None, tools=_captured_tools.copy())
 
     except Exception as e:
         logger.exception(f"chat_respond error: {e}")
@@ -363,7 +454,7 @@ def chat_respond(
         else:
             error = create_error("unknown", "An error occurred", str(e))
         
-        return ChatResult(response="", emotion=None, error=error)
+        return ChatResult(response="", emotion=None, error=error, tools=_captured_tools.copy())
 
 
 def chat_respond_with_tools(

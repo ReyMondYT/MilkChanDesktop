@@ -1,0 +1,10 @@
+[
+  {
+    "role": "user",
+    "content": "Can you search politics news"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  }
+]
