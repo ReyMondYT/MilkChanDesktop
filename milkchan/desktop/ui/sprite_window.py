@@ -176,9 +176,9 @@ class SpriteWindow(QMainWindow):
         self.schedule_proactive_message()
 
         # Start IPC server for terminal chat
-        ipc_server = get_ipc_server()
-        ipc_server.set_sprite_window(self)
-        ipc_server.start()
+        self.ipc_server = get_ipc_server()
+        self.ipc_server.set_sprite_window(self)
+        self.ipc_server.start()
     
     def __del__(self):
         try:
@@ -715,11 +715,11 @@ class SpriteWindow(QMainWindow):
         self.chat_overlay.user_input.hide()
         self.chat_overlay.ai_response.show()
         memory_client.update_history([])
-        
+
         # Notify TUI if active
         if hasattr(self, 'ipc_server') and self.ipc_server:
             self.ipc_server.notify_tui_clear_history()
-        
+
         try:
             self.update_sprite_emotion(['arms_down', 'smile', 1])
         except Exception:

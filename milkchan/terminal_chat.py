@@ -497,14 +497,12 @@ def handle_sync_event(event: Dict[str, Any], history: list, history_file: str) -
             return True
         
         elif msg_type == 'system' and data.get('action') == 'clear_history':
-            # History cleared from chatbox
+            # History cleared from chatbox - just clear history, don't clear screen
+            # The prompt.ask is blocking, so we can't reprint the prompt
             history.clear()
             save_history(history_file, history)
-            console.clear()
-            console.print(Panel("[bold red]Milk Chan Terminal Chat[/bold red]", style=ACCENT, box=ROUNDED))
-            console.print("[dim](Connected to MilkChan - sprites and audio will respond)[/dim]")
             console.print()
-            console.print("[yellow]History cleared from main app[/yellow]")
+            console.print("[yellow]═══ History cleared ═══[/yellow]")
             console.print()
             return True
     
