@@ -439,27 +439,27 @@ def display_assistant_response(response: str, emotion: dict):
         # Start speech animation via IPC
         send_to_milkchan('start_speech')
         
-        # Stream the response with typing effect
+        # Send emotion if available
         if emotion:
             send_to_milkchan('stream_start', {'emotion': emotion})
         
-        # Character-by-character streaming for typing effect
-        char_delay = 0.02  # 20ms per character
+        # Use Rich Live for smooth markdown streaming
+        words = response.split(' ')
         displayed = ""
         
-        for char in response:
-            displayed += char
-            md = Markdown(displayed)
-            console.print(md, end='')
-            console.file.write('\x1b[1A')  # Move cursor up
-            console.file.flush()
-            time.sleep(char_delay)
+        with Live(console=console, refresh_per_second=30, transient=True) as live:
+            for i, word in enumerate(words):
+                if i == 0:
+                    displayed = word
+                else:
+                    displayed = f"{displayed} {word}"
+                
+                # Update the live display with markdown rendering
+                live.update(Markdown(displayed))
+                time.sleep(0.02)
         
-        # Final render
-        console.file.write('\x1b[0J')  # Clear to end of line
-        console.file.flush()
-        md = Markdown(displayed)
-        console.print(md)
+        # Final render (persistent)
+        console.print(Markdown(response))
         
         # End speech animation
         send_to_milkchan('stream_end')
@@ -647,9 +647,10 @@ def main():
                 # Create unique identifier for this tool call (name + arguments)
                 args_str = str(sorted(tool.get('arguments', {}).items()))
                 tool_hash = f"{tool_name}:{args_str}"
-                if tool_hash not in displayed_tools:
+                completion_hash = f"{tool_hash}:completed"
+                if completion_hash not in displayed_tools:
                     display_tool_event({'type': 'tool_end', 'data': tool})
-                    displayed_tools.add(tool_hash)
+                    displayed_tools.add(completion_hash)
             
             # Display assistant response with typing animation
             display_assistant_response(response, emotion)
