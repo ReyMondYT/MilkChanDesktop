@@ -57,12 +57,13 @@ ACCENT_DIM = "#8a2828"
 
 
 _prompt_label_active = False
+_prompt_waiting_for_input = False
 
 
 def _render_inline_prompt_label():
     """Render the "You:" prompt label manually when Prompt.ask can't redraw."""
     global _prompt_label_active
-    if _prompt_label_active:
+    if not _prompt_waiting_for_input or _prompt_label_active:
         return
     console.print("[bold cyan]You:[/bold cyan] ", end="")
     console.file.flush()
@@ -73,7 +74,8 @@ def _suspend_inline_prompt_label() -> bool:
     """Ensure subsequent console output starts on a new line."""
     global _prompt_label_active
     if _prompt_label_active:
-        console.print()
+        console.file.write('\r\x1b[2K')
+        console.file.flush()
         _prompt_label_active = False
         return True
     return False
@@ -88,14 +90,16 @@ def _restore_inline_prompt_label(previously_active: bool):
 
 def _flag_prompt_label_active():
     """Mark that Prompt.ask has drawn its label so guards can restore it."""
-    global _prompt_label_active
+    global _prompt_label_active, _prompt_waiting_for_input
+    _prompt_waiting_for_input = True
     _prompt_label_active = True
 
 
 def _mark_prompt_consumed():
     """Reset prompt label state once Prompt.ask has collected input."""
-    global _prompt_label_active
+    global _prompt_label_active, _prompt_waiting_for_input
     _prompt_label_active = False
+    _prompt_waiting_for_input = False
 
 
 @contextmanager
