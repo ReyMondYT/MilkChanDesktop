@@ -204,6 +204,12 @@ class IPCServer:
             self._tui_active = False
             return {'status': 'ok'}
 
+        if command == 'clear_history':
+            return self._handle_clear_history()
+
+        if command == 'sync_message':
+            return self._handle_sync_message(params)
+
         if command == 'chat':
             return self._handle_chat(params)
 
@@ -315,16 +321,70 @@ class IPCServer:
                 }
             }
 
-    # === Streaming Infrastructure for Scalable Real-time Updates ===
-    
+# === Streaming Infrastructure for Scalable Real-time Updates ===
+
     def get_stream_port(self) -> int:
         """Get the streaming broker port."""
         return STREAM_PORT
-    
+
     def get_broker_stats(self) -> Dict[str, Any]:
         """Get streaming broker statistics."""
         return self._broker.get_stats()
-    
+
+    def _handle_clear_history(self) -> Dict[str, Any]:
+        """Clear chat history and notify all connected clients."""
+        from milkchan.desktop.services import memory_client
+        
+        # Clear the history
+        memory_client.update_history([])
+        logger.info("[IPC] History cleared")
+        
+        # Publish clear event to streaming broker for TUI
+        self._broker.publish(EventType.TOOL_START, {
+            'type': 'system',
+            'action': 'clear_history',
+            'message': 'History cleared'
+        })
+        
+        return {'status': 'ok', 'tui_notified': self._tui_active}
+
+    def _handle_sync_message(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Sync a message from chatbox to TUI."""
+        role = params.get('role', 'user')
+        content = params.get('content', '')
+        emotion = params.get('emotion')
+        
+        # Publish message event to streaming broker
+        self._broker.publish(EventType.CHAT_RESPONSE, {
+            'type': 'sync_message',
+'role': role,
+            'content': content,
+            'emotion': emotion
+        })
+
+        logger.info(f"[IPC] Synced message to TUI: {role[:10]}...")
+        return {'status': 'ok', 'tui_notified': self._tui_active}
+
+    def notify_tui_clear_history(self):
+        """Called by chatbox to notify TUI of history clear."""
+        if self._tui_active:
+            self._broker.publish(EventType.CHAT_RESPONSE, {
+                'type': 'system',
+                'action': 'clear_history'
+            })
+            logger.info("[IPC] Notified TUI of history clear")
+
+    def notify_tui_new_message(self, role: str, content: str, emotion: dict = None):
+        """Called by chatbox to send message to TUI."""
+        if self._tui_active:
+            self._broker.publish(EventType.CHAT_RESPONSE, {
+                'type': 'sync_message',
+                'role': role,
+                'content': content,
+                'emotion': emotion
+            })
+            logger.info(f"[IPC] Sent message to TUI: {role}")
+
     def _handle_stream_start(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Initialize streaming with emotion"""
         emotion = params.get('emotion', {})
@@ -333,16 +393,16 @@ class IPCServer:
             if emotion_data:
                 self.sprite_window._pending_emotion = emotion_data
                 self._invoke_on_main_thread('_apply_pending_emotion')
-        return {'status': 'ok'}
+            return {'status': 'ok'}
 
     def _handle_stream_text(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Stream text chunk - update speech animation"""
         text = params.get('text', '')
         is_final = params.get('final', False)
-        
+
         if self.sprite_window:
             self._invoke_on_main_thread('start_speech_animation')
-        
+
         return {'status': 'ok', 'received': len(text)}
 
     def _handle_stream_end(self) -> Dict[str, Any]:

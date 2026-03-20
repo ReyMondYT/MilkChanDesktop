@@ -87,14 +87,21 @@ class InfoBlock:
             'title_style': Style(color='#50fa7b', bold=True),
             'bg_color': '#153020',
         },
-        'rate_limit': {
-            'title': 'Rate Limited',
-            'icon': '⏳',
-            'border_style': Style(color='#ffb86c'),
-            'title_style': Style(color='#ffb86c', bold=True),
-            'bg_color': '#3a2a15',
-        },
-        'network': {
+'rate_limit': {
+        'title': 'Rate Limited',
+        'icon': '⏳',
+        'border_style': Style(color='#ffb86c'),
+        'title_style': Style(color='#ffb86c', bold=True),
+        'bg_color': '#3a2a15',
+    },
+    'completed': {
+        'title': 'Tool',
+        'icon': '✓',
+        'border_style': Style(color='#50fa7b'),
+        'title_style': Style(color='#50fa7b', bold=True),
+        'bg_color': '#153020',
+    },
+    'network': {
             'title': 'Connection Error',
             'icon': '📡',
             'border_style': Style(color='#ff79c6'),
@@ -380,55 +387,128 @@ def display_tools(tools: List[Dict]):
         console.print()
 
 
+_active_tool_blocks: Dict[str, int] = {}
+
+
 def display_tool_event(event: Dict[str, Any]):
-    """Display a single tool event in real-time."""
+    """Display a single tool event in real-time with overwrite support."""
+    global _active_tool_blocks
+
     event_type = event.get('type', 'tool_end')
     data = event.get('data', {})
-    
+
     tool_name = data.get('tool_name', 'unknown')
-    status = data.get('status', 'completed')
-    
+
     # Skip internal tools
     if tool_name in ('update_sprite', 'reset_sprite_state'):
         return
-    
-    # Status icons
+
+    # Create unique identifier for this tool call
+    args_str = str(sorted(data.get('arguments', {}).items()))
+    tool_hash = f"{tool_name}:{args_str}"
+
+    # Determine status and style
     if event_type == 'tool_start':
         status_icon = '⏳'
         status_text = 'running'
+        block_type = 'tool'
     elif event_type == 'tool_error':
         status_icon = '✗'
         status_text = 'error'
+        block_type = 'error'
     else:
         status_icon = '✓'
         status_text = 'completed'
-    
+        block_type = 'completed'
+
     # Build details
     details_parts = [f"Status: {status_icon} {status_text}"]
-    
+
     # Show arguments
     args = data.get('arguments', {})
     if args and tool_name == 'web_search':
         query = args.get('query', '')
         if query:
             details_parts.append(f"Query: [cyan]{query}[/cyan]")
-    
+
     # Show result
     result = data.get('result')
     if result:
         formatted = format_tool_result(result)
         if formatted:
             details_parts.append(formatted)
-    
+
     # Show error
     error = data.get('error')
     if error:
         details_parts.append(f"[red]Error: {error}[/red]")
-    
+
     details = "\n".join(details_parts)
-    
-    console.print(InfoBlock.render('tool', f"[bold]{tool_name}[/bold]", details))
+
+    # For tool_end, overwrite the running block if we tracked it
+    if event_type == 'tool_end' and tool_hash in _active_tool_blocks:
+        lines_to_clear = _active_tool_blocks[tool_hash]
+        # Move cursor up and clear lines
+        for _ in range(lines_to_clear):
+            sys.stdout.write('\x1b[1A')  # Cursor up
+            sys.stdout.write('\x1b[2K')  # Clear line
+        sys.stdout.write('\x1b[0J')  # Clear to end
+        sys.stdout.flush()
+        del _active_tool_blocks[tool_hash]
+
+    # Render the block
+    panel = InfoBlock.render(block_type, f"[bold]{tool_name}[/bold]", details)
+    console.print(panel)
     console.print()
+
+    # Track lines for running tools (to overwrite later)
+    if event_type == 'tool_start':
+        # Estimate lines: panel height + 1 for blank line
+        # Panel height depends on content, estimate generously
+        estimated_lines = 6 + details.count('\n')
+        _active_tool_blocks[tool_hash] = estimated_lines
+
+
+def handle_sync_event(event: Dict[str, Any], history: list, history_file: str) -> bool:
+    """Handle sync events from chatbox. Returns True if handled."""
+    event_type = event.get('type', '')
+    data = event.get('data', {})
+    
+    # Check if this is a chat_response sync event
+    if event_type == 'chat_response':
+        msg_type = data.get('type', '')
+        
+        if msg_type == 'sync_message':
+            role = data.get('role', 'user')
+            content = data.get('content', '')
+            emotion = data.get('emotion')
+            
+            # Add to history
+            history.append({'role': role, 'content': content})
+            save_history(history_file, history)
+            
+            # Display the message
+            if role == 'user':
+                console.print(f"[bold cyan]You:[/bold cyan] {content}")
+                console.print()
+            elif role == 'assistant':
+                display_assistant_response(content, emotion)
+            
+            return True
+        
+        elif msg_type == 'system' and data.get('action') == 'clear_history':
+            # History cleared from chatbox
+            history.clear()
+            save_history(history_file, history)
+            console.clear()
+            console.print(Panel("[bold red]Milk Chan Terminal Chat[/bold red]", style=ACCENT, box=ROUNDED))
+            console.print("[dim](Connected to MilkChan - sprites and audio will respond)[/dim]")
+            console.print()
+            console.print("[yellow]History cleared from main app[/yellow]")
+            console.print()
+            return True
+    
+    return False
 
 
 def display_assistant_response(response: str, emotion: dict):
@@ -494,35 +574,39 @@ def main():
     # Import stream client
     from milkchan.desktop.services.stream_client import StreamClient, StreamConfig, ConnectionState
     
-    # Track displayed tools to avoid duplicates
+# Track displayed tools to avoid duplicates
     displayed_tools = set()
-    
+
     def on_stream_event(event: Dict[str, Any]):
         """Handle stream events with deduplication."""
+        # Check for sync events first (from chatbox)
+        if handle_sync_event(event, history, history_file):
+            return
+
         event_type = event.get('type', '')
         data = event.get('data', {})
         tool_name = data.get('tool_name', 'unknown')
-        
+
         # Skip internal tools
         if tool_name in ('update_sprite', 'reset_sprite_state'):
             return
-        
+
         # Create unique identifier for this tool call (name + args only)
         # Don't include event_type so start+end are tracked together
         args_str = str(sorted(data.get('arguments', {}).items()))
         tool_hash = f"{tool_name}:{args_str}"
-        
+
         # For tool_end events, check if we already showed this tool completing
         if event_type == 'tool_end':
             completion_hash = f"{tool_hash}:completed"
             if completion_hash in displayed_tools:
                 return  # Already showed completion
             displayed_tools.add(completion_hash)
-        
+
         # For tool_start, just mark that we showed it starting
         if event_type == 'tool_start':
             displayed_tools.add(f"{tool_hash}:started")
-        
+
         display_tool_event(event)
     
     # Create stream client for real-time tool events
@@ -533,7 +617,7 @@ def main():
     )
     
     # Connect to stream
-    stream_connected = stream_client.connect(filters=['tool_start', 'tool_end', 'tool_error'])
+    stream_connected = stream_client.connect(filters=['tool_start', 'tool_end', 'tool_error', 'chat_response'])
     if stream_connected:
         console.print("[dim]Connected to event stream[/dim]")
     

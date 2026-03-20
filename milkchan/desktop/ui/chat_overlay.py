@@ -322,6 +322,11 @@ class ChatOverlay(QWidget):
             self.hide_agent_question()
             return
         self._add_to_history('user', text)
+        
+        # Notify TUI if active
+        if hasattr(self.parent(), 'ipc_server') and self.parent().ipc_server:
+            self.parent().ipc_server.notify_tui_new_message('user', text)
+        
         self.timer_reset_for_this_message = False
         self.user_input.hide()
         self.ai_response.clear()
@@ -381,6 +386,10 @@ class ChatOverlay(QWidget):
         self.current_response = response
         self.displayed_chars = 0
         self._add_to_history('assistant', response)
+        
+        # Notify TUI if active
+        if hasattr(self.parent(), 'ipc_server') and self.parent().ipc_server:
+            self.parent().ipc_server.notify_tui_new_message('assistant', response, emotion)
 
         # Start narration loop, if configured
         if self.audio_player.mediaStatus() != QMediaPlayer.NoMedia:
