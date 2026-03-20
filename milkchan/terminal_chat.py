@@ -21,6 +21,8 @@ try:
     from rich.panel import Panel
     from rich.prompt import Prompt
     from rich.text import Text
+    from rich.live import Live
+    from rich.layout import Layout
     from rich import print as rprint
 except ImportError:
     print("Installing rich...")
@@ -31,6 +33,8 @@ except ImportError:
     from rich.panel import Panel
     from rich.prompt import Prompt
     from rich.text import Text
+    from rich.live import Live
+    from rich.layout import Layout
     from rich import print as rprint
 
 console = Console(force_terminal=True, soft_wrap=True)
@@ -114,8 +118,8 @@ def display_history(history: list):
             console.print()
 
 
-def stream_response(response: str, emotion: dict, char_delay: float = 0.02):
-    """Stream response character by character, synced with MilkChan speech"""
+def stream_response(response: str, emotion: dict, char_delay: float = 0.03):
+    """Stream response character by character with smooth markdown rendering"""
     
     # Send emotion update and start speech
     if emotion:
@@ -124,23 +128,22 @@ def stream_response(response: str, emotion: dict, char_delay: float = 0.02):
     # Start speech animation - keep it running for the whole message
     send_to_milkchan('start_speech')
 
-    # Stream text with typewriter effect, render markdown at the end
-    console.print()
-    console.print("[bold magenta]Milk Chan:[/bold magenta] ", end="")
+    displayed = ""
     
-    # First pass: stream raw text quickly
-    for char in response:
-        console.print(char, end="", soft_wrap=True)
-        time.sleep(char_delay)
+    # Create initial markdown
+    md = Markdown(displayed)
     
-    console.print()
+    with Live(md, refresh_per_second=30, transient=False) as live:
+        for char in response:
+            displayed += char
+            # Update the markdown content
+            md = Markdown(displayed)
+            live.update(md)
+            time.sleep(char_delay)
     
-    # Second pass: re-render with markdown
-    console.print("\x1b[1A\x1b[2K", end="")  # Clear the last line
-    console.print("\x1b[1A\x1b[2K", end="")  # Clear the "Milk Chan:" line too
-    console.print("[bold magenta]Milk Chan:[/bold magenta]")
-    md = Markdown(response)
-    console.print(md)
+    # Final render with header
+    console.print("\n[bold magenta]Milk Chan:[/bold magenta]")
+    console.print(Markdown(displayed))
     
     # End streaming after full message is displayed
     send_to_milkchan('stream_end')
