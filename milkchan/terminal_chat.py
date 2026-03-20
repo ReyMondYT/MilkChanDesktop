@@ -388,7 +388,6 @@ def display_tools(tools: List[Dict]):
 
 
 _active_tool_blocks: Dict[str, int] = {}
-_history_cleared: bool = False
 
 
 def display_tool_event(event: Dict[str, Any]):
@@ -474,7 +473,7 @@ def handle_sync_event(event: Dict[str, Any], history: list, history_file: str) -
     """Handle sync events from chatbox. Returns True if handled."""
     event_type = event.get('type', '')
     data = event.get('data', {})
-    
+
     # Check if this is a chat_response sync event
     if event_type == 'chat_response':
         msg_type = data.get('type', '')
@@ -499,11 +498,14 @@ def handle_sync_event(event: Dict[str, Any], history: list, history_file: str) -
         
         elif msg_type == 'system' and data.get('action') == 'clear_history':
             # History cleared from chatbox
-            # Set flag so main loop can refresh the display
-            global _history_cleared
-            _history_cleared = True
             history.clear()
             save_history(history_file, history)
+            console.clear()
+            console.print(Panel("[bold red]Milk Chan Terminal Chat[/bold red]", style=ACCENT, box=ROUNDED))
+            console.print("[dim](Connected to MilkChan - sprites and audio will respond)[/dim]")
+            console.print()
+            console.print("[yellow]History cleared from main app[/yellow]")
+            console.print()
             return True
     
     return False
@@ -654,18 +656,6 @@ def main():
     while True:
         try:
             user_input = Prompt.ask("[bold cyan]You[/bold cyan]")
-
-            # Check if history was cleared externally (from chatbox)
-            global _history_cleared
-            if _history_cleared:
-                _history_cleared = False
-                console.clear()
-                console.print(Panel("[bold red]Milk Chan Terminal Chat[/bold red]", style=ACCENT, box=ROUNDED))
-                console.print("[dim](Connected to MilkChan - sprites and audio will respond)[/dim]")
-                console.print()
-                console.print("[yellow]═══ History cleared ═══[/yellow]")
-                console.print()
-                continue  # Skip to next iteration to show fresh prompt
 
             if shutdown_event.is_set():
                 break
