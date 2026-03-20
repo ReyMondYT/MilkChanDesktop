@@ -114,29 +114,35 @@ def display_history(history: list):
             console.print()
 
 
-def stream_response(response: str, emotion: dict, char_delay: float = 0.03):
+def stream_response(response: str, emotion: dict, char_delay: float = 0.02):
     """Stream response character by character, synced with MilkChan speech"""
     
     # Send emotion update and start speech
     if emotion:
         send_to_milkchan('stream_start', {'emotion': emotion})
-    
-    # Start speech animation
+
+    # Start speech animation - keep it running for the whole message
     send_to_milkchan('start_speech')
-    
-    # Stream text with typewriter effect
-    displayed = ""
+
+    # Stream text with typewriter effect, render markdown at the end
     console.print()
     console.print("[bold magenta]Milk Chan:[/bold magenta] ", end="")
     
+    # First pass: stream raw text quickly
     for char in response:
-        displayed += char
         console.print(char, end="", soft_wrap=True)
         time.sleep(char_delay)
     
-    console.print()  # New line at end
+    console.print()
     
-    # End streaming
+    # Second pass: re-render with markdown
+    console.print("\x1b[1A\x1b[2K", end="")  # Clear the last line
+    console.print("\x1b[1A\x1b[2K", end="")  # Clear the "Milk Chan:" line too
+    console.print("[bold magenta]Milk Chan:[/bold magenta]")
+    md = Markdown(response)
+    console.print(md)
+    
+    # End streaming after full message is displayed
     send_to_milkchan('stream_end')
 
 
