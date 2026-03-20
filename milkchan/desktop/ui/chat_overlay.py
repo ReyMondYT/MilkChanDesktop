@@ -54,6 +54,10 @@ class ChatOverlay(QWidget):
         if os.path.exists(NARRATION_PATH):
             url = QUrl.fromLocalFile(os.path.abspath(NARRATION_PATH))
             self.audio_player.setMedia(QMediaContent(url))
+            # Loop audio while speaking
+            self._audio_looper = QTimer(self)
+            self._audio_looper.timeout.connect(self._loop_audio_if_speaking)
+            self._audio_looper.start(100)
 
         self.worker = None
         self.timer_reset_for_this_message = False
@@ -65,6 +69,12 @@ class ChatOverlay(QWidget):
 
         self.setup_ui()
         self.hide()
+
+    def _loop_audio_if_speaking(self):
+        """Restart audio if we're still speaking and audio has stopped"""
+        if self.parent() and hasattr(self.parent(), 'is_speaking'):
+            if self.parent().is_speaking and self.audio_player.state() != QMediaPlayer.PlayingState:
+                self.audio_player.play()
 
     def setup_ui(self):
         self.setStyleSheet('background-color: transparent;')
