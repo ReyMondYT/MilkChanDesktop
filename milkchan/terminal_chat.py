@@ -33,7 +33,7 @@ except ImportError:
     from rich.text import Text
     from rich import print as rprint
 
-console = Console()
+console = Console(force_terminal=True, soft_wrap=True)
 
 ACCENT = "#ac3232"
 
