@@ -388,6 +388,7 @@ def display_tools(tools: List[Dict]):
 
 
 _active_tool_blocks: Dict[str, int] = {}
+_history_cleared: bool = False
 
 
 def display_tool_event(event: Dict[str, Any]):
@@ -497,13 +498,12 @@ def handle_sync_event(event: Dict[str, Any], history: list, history_file: str) -
             return True
         
         elif msg_type == 'system' and data.get('action') == 'clear_history':
-            # History cleared from chatbox - just clear history, don't clear screen
-            # The prompt.ask is blocking, so we can't reprint the prompt
+            # History cleared from chatbox
+            # Set flag so main loop can refresh the display
+            global _history_cleared
+            _history_cleared = True
             history.clear()
             save_history(history_file, history)
-            console.print()
-            console.print("[yellow]═══ History cleared ═══[/yellow]")
-            console.print()
             return True
     
     return False
@@ -654,6 +654,18 @@ def main():
     while True:
         try:
             user_input = Prompt.ask("[bold cyan]You[/bold cyan]")
+
+            # Check if history was cleared externally (from chatbox)
+            global _history_cleared
+            if _history_cleared:
+                _history_cleared = False
+                console.clear()
+                console.print(Panel("[bold red]Milk Chan Terminal Chat[/bold red]", style=ACCENT, box=ROUNDED))
+                console.print("[dim](Connected to MilkChan - sprites and audio will respond)[/dim]")
+                console.print()
+                console.print("[yellow]═══ History cleared ═══[/yellow]")
+                console.print()
+                continue  # Skip to next iteration to show fresh prompt
 
             if shutdown_event.is_set():
                 break
