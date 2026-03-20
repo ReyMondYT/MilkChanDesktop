@@ -11,7 +11,74 @@ import time
 import json
 import logging
 import importlib
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, TypedDict, Union
+
+
+class ChatError(TypedDict):
+    type: str
+    message: str
+    details: Optional[str]
+    http_status: Optional[int]
+
+
+class ChatResult(TypedDict):
+    response: str
+    emotion: Optional[dict]
+    error: Optional[ChatError]
+
+
+def create_error(error_type: str, message: str, details: Optional[str] = None, http_status: Optional[int] = None) -> ChatError:
+    return ChatError(
+        type=error_type,
+        message=message,
+        details=details,
+        http_status=http_status
+    )
+
+
+def classify_http_error(status_code: int, url: str = "") -> ChatError:
+    if status_code == 429:
+        return create_error(
+            "rate_limit",
+            "API rate limit exceeded",
+            "The AI service is busy. Please wait a moment and try again.",
+            http_status=429
+        )
+    elif status_code == 401:
+        return create_error(
+            "auth_error",
+            "Authentication failed",
+            "Please check your API key configuration.",
+            http_status=401
+        )
+    elif status_code == 402:
+        return create_error(
+            "payment_required",
+            "API quota exceeded",
+            "The API account needs credits. Please add funds or wait for quota reset.",
+            http_status=402
+        )
+    elif status_code == 408 or status_code == 504:
+        return create_error(
+            "timeout",
+            "Request timed out",
+            "The AI took too long to respond. Try again.",
+            http_status=status_code
+        )
+    elif status_code >= 500:
+        return create_error(
+            "server_error",
+            "AI service error",
+            f"The AI service returned error {status_code}. Try again later.",
+            http_status=status_code
+        )
+    else:
+        return create_error(
+            "http_error",
+            f"Request failed ({status_code})",
+            f"URL: {url}",
+            http_status=status_code
+        )
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -204,78 +271,99 @@ def chat_respond(
     image_path: Optional[str] = None,
     video_path: Optional[str] = None,
     timeout_sec: Optional[float] = None
-) -> Tuple[str, Optional[dict]]:
+) -> ChatResult:
     global _last_emotion, _last_sprite_update
-    
+
     t0 = time.perf_counter()
     config = _get_config()
-    
+
     # Reset sprite state for new conversation turn
     from milkchan.custom_tools.update_sprite import reset_sprite_state
     reset_sprite_state()
-    
+
     if history is None:
         history = []
-    
+
     if persona_description:
         set_persona(persona_description)
-    
+
     _last_sprite_update = None
     _last_emotion = {}
-    
+
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     hidden_text = f"--Hidden context: Time: {timestamp} | PC Name: {username or 'User'}--\n{user_message}"
-    
+
     messages: List[dict] = []
-    
+
     for msg in history:
         messages.append(msg)
-    
+
     user_content = hidden_text
-    
+
     if image_path and os.path.exists(image_path):
         try:
             import base64
             with open(image_path, 'rb') as f:
                 image_data = base64.b64encode(f.read()).decode('utf-8')
-            
+
             user_content = [
                 {"type": "text", "text": hidden_text},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
             ]
         except Exception as e:
             logger.warning(f"Failed to attach image: {e}")
-    
+
     messages.append({"role": "user", "content": user_content})
-    
+
     try:
         llm = _get_llm()
-        
+
         response = llm.completion(messages, stream=False)
-        
+
         reply_text = ""
         emotion_obj = None
-        
+
         if isinstance(response, dict):
             if 'error' in response:
                 logger.error(f"LLM error: {response['error']}")
-                return "", None
-            
+                return ChatResult(
+                    response="",
+                    emotion=None,
+                    error=create_error("api_error", "AI returned an error", str(response.get('error')))
+                )
+
             choices = response.get('choices', [])
             if choices:
                 reply_text = choices[0].get('message', {}).get('content', '')
-        
-        if _last_emotion:
-            emotion_obj = _last_emotion
-        
+
+            if _last_emotion:
+                emotion_obj = _last_emotion
+
         total_time = time.perf_counter() - t0
         logger.info(f"✓ chat_respond: TOTAL={total_time:.2f}s reply_len={len(reply_text)} has_emotion={bool(emotion_obj)}")
-        
-        return reply_text.strip(), emotion_obj
-        
+
+        return ChatResult(response=reply_text.strip(), emotion=emotion_obj, error=None)
+
     except Exception as e:
         logger.exception(f"chat_respond error: {e}")
-        return "", None
+        
+        error = None
+        
+        # Check for HTTP errors with status code
+        if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+            error = classify_http_error(e.response.status_code, str(getattr(e, 'url', '')))
+        elif '429' in str(e) or 'Too Many Requests' in str(e):
+            error = classify_http_error(429)
+        elif '401' in str(e) or 'Unauthorized' in str(e):
+            error = classify_http_error(401)
+        elif 'timeout' in str(e).lower() or 'timed out' in str(e).lower():
+            error = create_error("timeout", "Request timed out", "The AI took too long to respond.")
+        elif 'connection' in str(e).lower() or 'network' in str(e).lower():
+            error = create_error("network", "Connection failed", "Could not reach the AI service. Check your network.")
+        else:
+            error = create_error("unknown", "An error occurred", str(e))
+        
+        return ChatResult(response="", emotion=None, error=error)
 
 
 def chat_respond_with_tools(

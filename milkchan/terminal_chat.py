@@ -12,6 +12,7 @@ import os
 import socket
 import time
 from pathlib import Path
+from typing import Optional, Dict, Any, List
 
 IPC_PORT = 19527
 
@@ -23,6 +24,8 @@ try:
     from rich.text import Text
     from rich.live import Live
     from rich.layout import Layout
+    from rich.box import ROUNDED, MINIMAL
+    from rich.style import Style
     from rich import print as rprint
 except ImportError:
     print("Installing rich...")
@@ -35,11 +38,125 @@ except ImportError:
     from rich.text import Text
     from rich.live import Live
     from rich.layout import Layout
+    from rich.box import ROUNDED, MINIMAL
+    from rich.style import Style
     from rich import print as rprint
 
 console = Console(force_terminal=True, soft_wrap=True)
 
 ACCENT = "#ac3232"
+ACCENT_DIM = "#8a2828"
+
+
+class InfoBlock:
+    """Beautiful info block for displaying errors, tool calls, and system messages."""
+    
+    STYLES = {
+        'error': {
+            'title': 'Error',
+            'icon': '✕',
+            'border_style': Style(color='#ff6b6b'),
+            'title_style': Style(color='#ff6b6b', bold=True),
+            'bg_color': '#3a1515',
+        },
+        'warning': {
+            'title': 'Warning',
+            'icon': '⚠',
+            'border_style': Style(color='#ffb86c'),
+            'title_style': Style(color='#ffb86c', bold=True),
+            'bg_color': '#3a2a15',
+        },
+        'tool': {
+            'title': 'Tool',
+            'icon': '⚙',
+            'border_style': Style(color='#8be9fd'),
+            'title_style': Style(color='#8be9fd', bold=True),
+            'bg_color': '#152030',
+        },
+        'info': {
+            'title': 'Info',
+            'icon': 'ℹ',
+            'border_style': Style(color='#50fa7b'),
+            'title_style': Style(color='#50fa7b', bold=True),
+            'bg_color': '#153020',
+        },
+        'rate_limit': {
+            'title': 'Rate Limited',
+            'icon': '⏳',
+            'border_style': Style(color='#ffb86c'),
+            'title_style': Style(color='#ffb86c', bold=True),
+            'bg_color': '#3a2a15',
+        },
+        'network': {
+            'title': 'Connection Error',
+            'icon': '📡',
+            'border_style': Style(color='#ff79c6'),
+            'title_style': Style(color='#ff79c6', bold=True),
+            'bg_color': '#301530',
+        },
+        'timeout': {
+            'title': 'Timeout',
+            'icon': '⏱',
+            'border_style': Style(color='#f1fa8c'),
+            'title_style': Style(color='#f1fa8c', bold=True),
+            'bg_color': '#303015',
+        },
+    }
+    
+    @classmethod
+    def render(cls, block_type: str, message: str, details: Optional[str] = None) -> Panel:
+        style = cls.STYLES.get(block_type, cls.STYLES['info'])
+        
+        content_parts = [message]
+        if details:
+            content_parts.append(f"[dim]{details}[/dim]")
+        
+        content = '\n'.join(content_parts)
+        
+        title = f"{style['icon']} {style['title']}"
+        
+        return Panel(
+            content,
+            title=title,
+            title_style=style['title_style'],
+            border_style=style['border_style'],
+            box=ROUNDED,
+            padding=(0, 1),
+            expand=False,
+        )
+    
+    @classmethod
+    def render_error(cls, error: Dict[str, Any]) -> Panel:
+        error_type = error.get('type', 'error') if isinstance(error, dict) else 'error'
+        message = error.get('message', 'An error occurred') if isinstance(error, dict) else str(error)
+        details = error.get('details') if isinstance(error, dict) else None
+        
+        block_type = error_type if error_type in cls.STYLES else 'error'
+        return cls.render(block_type, message, details)
+
+
+class ChatEntry:
+    """Represents a single entry in the chat history (message or info block)."""
+    
+    def __init__(self, entry_type: str, content: Any, metadata: Optional[Dict] = None):
+        self.entry_type = entry_type
+        self.content = content
+        self.metadata = metadata or {}
+        self.timestamp = time.strftime("%H:%M:%S")
+    
+    def render(self):
+        if self.entry_type == 'user':
+            return f"[bold cyan]You:[/bold cyan] {self.content}"
+        elif self.entry_type == 'assistant':
+            return None
+        elif self.entry_type == 'error':
+            return InfoBlock.render_error(self.content)
+        elif self.entry_type == 'tool':
+            tool_name = self.metadata.get('tool_name', 'unknown')
+            return InfoBlock.render('tool', f"Called [bold]{tool_name}[/bold]", self.content)
+        elif self.entry_type == 'info':
+            return InfoBlock.render('info', self.content, self.metadata.get('details'))
+        return None
 
 
 def send_to_milkchan(command: str, params: dict = None) -> dict:
@@ -100,15 +217,26 @@ def save_history(history_file: str, history: list):
 
 def display_history(history: list):
     console.clear()
-    console.print(Panel("[bold red]Milk Chan Terminal Chat[/bold red]", style=ACCENT))
+    console.print(Panel("[bold red]Milk Chan Terminal Chat[/bold red]", style=ACCENT, box=ROUNDED))
     console.print("[dim](Connected to MilkChan - sprites and audio will respond)[/dim]")
     console.print()
 
     for msg in history:
         role = msg.get('role', '')
         content = msg.get('content', '')
+        entry_type = msg.get('entry_type', '')
 
-        if role == 'user':
+        if entry_type == 'error':
+            console.print(InfoBlock.render_error(content))
+            console.print()
+        elif entry_type == 'tool':
+            tool_name = msg.get('tool_name', 'unknown')
+            console.print(InfoBlock.render('tool', f"Called [bold]{tool_name}[/bold]", content))
+            console.print()
+        elif entry_type == 'info':
+            console.print(InfoBlock.render('info', content, msg.get('details')))
+            console.print()
+        elif role == 'user':
             console.print(f"[bold cyan]You:[/bold cyan] {content}")
         elif role == 'assistant':
             console.print()
@@ -120,33 +248,34 @@ def display_history(history: list):
 
 def stream_response(response: str, emotion: dict, char_delay: float = 0.03):
     """Stream response character by character with smooth markdown rendering"""
-    
-    # Send emotion update and start speech
+
     if emotion:
         send_to_milkchan('stream_start', {'emotion': emotion})
 
-    # Start speech animation - keep it running for the whole message
     send_to_milkchan('start_speech')
 
     displayed = ""
-    
-    # Create initial markdown
+
     md = Markdown(displayed)
-    
+
     with Live(md, refresh_per_second=30, transient=False) as live:
         for char in response:
             displayed += char
-            # Update the markdown content
             md = Markdown(displayed)
             live.update(md)
             time.sleep(char_delay)
-    
-    # Final render with header
+
     console.print("\n[bold magenta]Milk Chan:[/bold magenta]")
     console.print(Markdown(displayed))
-    
-    # End streaming after full message is displayed
+
     send_to_milkchan('stream_end')
+
+
+def display_error_block(error: dict):
+    """Display a beautiful error block."""
+    console.print()
+    console.print(InfoBlock.render_error(error))
+    console.print()
 
 
 def main():
@@ -157,7 +286,6 @@ def main():
     history_file = sys.argv[1]
     history = load_history(history_file)
 
-    # Check connection to MilkChan
     result = send_to_milkchan('ping')
     if 'error' in result:
         console.print(f"[red]Cannot connect to MilkChan: {result['error']}[/red]")
@@ -166,19 +294,15 @@ def main():
 
     display_history(history)
 
-    # Notify MilkChan that TUI is active
     send_to_milkchan('tui_start')
 
     console.print("[dim]Type your message and press Enter. Type 'exit' or 'quit' to close.[/dim]")
     console.print()
 
-    # Start shutdown watcher thread
     import threading
-    import os
     import signal
     shutdown_event = threading.Event()
-    
-    # Store the parent PID (the cmd/terminal process that spawned this Python script)
+
     terminal_pid = os.getppid()
 
     def watch_for_shutdown():
@@ -188,7 +312,6 @@ def main():
             if 'error' in result:
                 shutdown_event.set()
                 console.print("\n[red]MilkChan closed. Closing terminal...[/red]")
-                # Kill only the specific terminal process
                 try:
                     if os.name == 'nt':
                         os.system(f'taskkill /f /pid {terminal_pid}')
@@ -222,8 +345,7 @@ def main():
 
             console.print("[bold magenta]Milk Chan:[/bold magenta] [dim]Thinking...[/dim]")
 
-            # Send chat request via IPC
-            api_messages = [{'role': m['role'], 'content': m['content']} for m in history]
+            api_messages = [{'role': m['role'], 'content': m['content']} for m in history if m.get('role') in ('user', 'assistant')]
             result = send_to_milkchan('chat', {
                 'message': user_input,
                 'history': api_messages[:-1]
@@ -232,15 +354,22 @@ def main():
             if shutdown_event.is_set():
                 break
 
-            if 'error' in result:
-                console.print(f"[red]Error: {result['error']}[/red]")
+            if result.get('status') == 'error' or 'error' in result:
+                error = result.get('error', {'type': 'unknown', 'message': result.get('error', 'Unknown error')})
+                console.file.write('\x1b[1A\x1b[2K')
+                console.file.flush()
+                display_error_block(error)
                 history.pop()
+                history.append({
+                    'entry_type': 'error',
+                    'content': error,
+                    'role': 'system'
+                })
                 continue
 
             response = result.get('response', '')
             emotion = result.get('emotion')
 
-            # Clear "Thinking..." line by printing control sequences directly
             console.file.write('\x1b[1A\x1b[2K')
             console.file.flush()
             stream_response(response, emotion, char_delay=0.025)

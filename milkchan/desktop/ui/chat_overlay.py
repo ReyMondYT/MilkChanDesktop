@@ -389,10 +389,47 @@ class ChatOverlay(QWidget):
 
         self.response_timer.start(self.char_delay)
 
-    def handle_error(self, error_message: str):
-        print(f"Worker error: {error_message}")
+    def handle_error(self, error: dict):
+        error_type = error.get('type', 'unknown') if isinstance(error, dict) else 'unknown'
+        error_message = error.get('message', 'An error occurred') if isinstance(error, dict) else str(error)
+        error_details = error.get('details') if isinstance(error, dict) else None
+        
+        friendly_messages = {
+            'rate_limit': "The AI service is busy right now. Please wait a moment and try again.",
+            'timeout': "The request took too long. Please try again.",
+            'network': "Could not connect to the AI service. Check your network connection.",
+            'auth_error': "Authentication failed. Please check your API key configuration.",
+            'payment_required': "API quota exceeded. Please add credits to your account.",
+            'server_error': "The AI service is experiencing issues. Try again later.",
+        }
+        
+        display_message = friendly_messages.get(error_type, error_message)
+        
+        print(f"[ChatOverlay] Error: {error_type} - {error_message}")
         self.ai_response.clear()
-        self.ai_response.setPlainText('Whoopsy! A background error occurred. Check the console for details.')
+        
+        error_html = f'''
+        <style>
+            body {{ color: #e6e6e6; font-family: '{self.font_family}', sans-serif; }}
+            .error-container {{ 
+                background-color: rgba(172, 50, 50, 0.3); 
+                border-left: 3px solid #ac3232;
+                padding: 12px;
+                margin: 8px 0;
+                border-radius: 4px;
+            }}
+            .error-title {{ color: #ff6b6b; font-weight: bold; margin-bottom: 8px; }}
+            .error-message {{ color: #e6e6e6; }}
+            .error-details {{ color: #9a9a9a; font-size: 0.9em; margin-top: 8px; }}
+        </style>
+        <div class="error-container">
+            <div class="error-title">Error</div>
+            <div class="error-message">{display_message}</div>
+            {f'<div class="error-details">{error_details}</div>' if error_details else ''}
+        </div>
+        '''
+        self.ai_response.setHtml(error_html)
+        
         self.parent().thinking = False
         self.parent().stop_speech_animation()
         self.audio_player.stop()

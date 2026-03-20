@@ -156,7 +156,6 @@ class IPCServer:
         username = params.get('username', 'User')
 
         try:
-            # Take screenshot for vision context (like chatbox does)
             config = load_config()
             processing = config.get('processing', {})
             vision_mode = processing.get('vision_mode', 'image')
@@ -179,20 +178,29 @@ class IPCServer:
                 except Exception as e:
                     logger.warning(f"[IPC] screenshot failed: {e}")
 
-            response, emotion = ai_client.chat_respond(
+            result = ai_client.chat_respond(
                 user_message=user_message,
                 history=history,
                 username=username,
                 image_path=screenshot_path
             )
 
-            # Save to database
+            response = result.get('response', '')
+            emotion = result.get('emotion')
+            error = result.get('error')
+
+            if error:
+                logger.error(f"[IPC] chat error: {error.get('type')} - {error.get('message')}")
+                return {
+                    'status': 'error',
+                    'error': error
+                }
+
             history.append({'role': 'user', 'content': user_message})
             history.append({'role': 'assistant', 'content': response})
             memory_client.update_history(history)
             logger.info(f"[IPC] saved {len(history)} messages to history")
 
-            # Cleanup screenshot
             if screenshot_path:
                 try:
                     import os
@@ -207,7 +215,15 @@ class IPCServer:
                 'emotion': emotion
             }
         except Exception as e:
-            return {'error': str(e)}
+            logger.exception(f"[IPC] chat exception: {e}")
+            return {
+                'status': 'error',
+                'error': {
+                    'type': 'ipc_error',
+                    'message': str(e),
+                    'details': None
+                }
+            }
 
     def _handle_stream_start(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Initialize streaming with emotion"""
