@@ -21,6 +21,9 @@ from typing import Optional, Dict, Any, List
 _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
+_package_root = Path(__file__).resolve().parent
+if str(_package_root) not in sys.path:
+    sys.path.insert(0, str(_package_root))
 
 IPC_PORT = 19527
 
@@ -621,6 +624,28 @@ def display_assistant_response(response: str, emotion: dict):
             console.print()
 
 
+def _import_stream_client_classes():
+    """
+    Import stream client classes without requiring full `milkchan` package imports.
+    In frozen TUI mode, importing `milkchan.desktop...` can execute `milkchan/__init__.py`,
+    which may reference modules not bundled for the external terminal script.
+    """
+    try:
+        from milkchan.desktop.services.stream_client import (
+            StreamClient,
+            StreamConfig,
+            ConnectionState,
+        )
+        return StreamClient, StreamConfig, ConnectionState
+    except ModuleNotFoundError:
+        from desktop.services.stream_client import (
+            StreamClient,
+            StreamConfig,
+            ConnectionState,
+        )
+        return StreamClient, StreamConfig, ConnectionState
+
+
 def main():
     if len(sys.argv) < 2:
         console.print("[red]Error: No history file provided[/red]")
@@ -640,7 +665,7 @@ def main():
     stream_port = tui_result.get('stream_port', 19528)
     
     # Import stream client
-    from milkchan.desktop.services.stream_client import StreamClient, StreamConfig, ConnectionState
+    StreamClient, StreamConfig, ConnectionState = _import_stream_client_classes()
     
 # Track displayed tools to avoid duplicates
     displayed_tools = set()
