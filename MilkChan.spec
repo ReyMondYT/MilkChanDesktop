@@ -36,6 +36,15 @@ if custom_tools_dir.exists():
         custom_tools_datas.append((str(py_file), str(rel_path.parent)))
     print(f"[SPEC] Custom tools files: {len(custom_tools_datas)}")
 
+# Files needed by external terminal_chat.py when launched via system Python
+terminal_tui_datas = [
+    (str(root / 'milkchan' / '__init__.py'), 'milkchan'),
+    (str(root / 'milkchan' / 'terminal_chat.py'), 'milkchan'),
+    (str(root / 'milkchan' / 'desktop' / '__init__.py'), 'milkchan/desktop'),
+    (str(root / 'milkchan' / 'desktop' / 'services' / '__init__.py'), 'milkchan/desktop/services'),
+    (str(root / 'milkchan' / 'desktop' / 'services' / 'stream_client.py'), 'milkchan/desktop/services'),
+]
+
 a = Analysis(
     ['milkchan/main.py'],
     pathex=[],
@@ -43,7 +52,7 @@ a = Analysis(
     datas=[
         # Bundle assets (will be extracted to sys._MEIPASS/assets)
         (str(assets_dir), 'assets'),
-    ] + framework_datas + custom_tools_datas,
+    ] + terminal_tui_datas + framework_datas + custom_tools_datas,
     hiddenimports=[
         'PyQt5',
         'PyQt5.QtCore',

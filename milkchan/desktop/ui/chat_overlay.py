@@ -1,8 +1,11 @@
 import os
 import json
+import sys
+import shutil
 import subprocess
 import tempfile
 import markdown2
+from pathlib import Path
 from PyQt5.QtCore import Qt, QTimer, QUrl, QSize, pyqtSignal
 from PyQt5.QtGui import QFont, QFontDatabase, QTextCursor, QPixmap
 from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
@@ -190,8 +193,22 @@ class ChatOverlay(QWidget):
 
     def _open_terminal_chat(self):
         self._save_history_to_file()
-        terminal_script = os.path.join(os.path.dirname(__file__), '..', '..', 'terminal_chat.py')
-        terminal_script = os.path.abspath(terminal_script)
+        terminal_script = self._resolve_terminal_script()
+        python_bin = self._resolve_python_for_tui()
+        if not terminal_script:
+            self.handle_error({
+                'type': 'error',
+                'message': 'Terminal chat script is missing from this build.',
+                'details': 'Rebuild using the updated PyInstaller spec to include milkchan/terminal_chat.py.',
+            })
+            return
+        if not python_bin:
+            self.handle_error({
+                'type': 'error',
+                'message': 'Python interpreter not found for terminal chat.',
+                'details': 'Install Python and ensure it is available in PATH as python or python3.',
+            })
+            return
 
         # Stop any active response
         self.response_timer.stop()
@@ -210,15 +227,36 @@ class ChatOverlay(QWidget):
 
         if os.name == 'nt':
             self.terminal_process = subprocess.Popen([
-                'cmd', '/c', 'start', 'cmd', '/k',
-                'python', terminal_script, self.history_file
-            ], shell=True)
+                'cmd', '/c', 'start', '', 'cmd', '/k',
+                python_bin, terminal_script, self.history_file
+            ])
         else:
+            terminal_emulator = shutil.which('x-terminal-emulator') or 'x-terminal-emulator'
             self.terminal_process = subprocess.Popen([
-                'x-terminal-emulator', '-e', 'python', terminal_script, self.history_file
+                terminal_emulator, '-e', python_bin, terminal_script, self.history_file
             ])
 
         self._start_terminal_watcher()
+
+    def _resolve_terminal_script(self):
+        candidates = []
+        candidates.append(Path(__file__).resolve().parent.parent.parent / 'terminal_chat.py')
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            candidates.append(Path(meipass) / 'milkchan' / 'terminal_chat.py')
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return None
+
+    def _resolve_python_for_tui(self):
+        if not getattr(sys, 'frozen', False):
+            return sys.executable
+        for cmd in ('python', 'python3'):
+            resolved = shutil.which(cmd)
+            if resolved:
+                return resolved
+        return None
 
     def _save_history_to_file(self):
         if self.history_file is None:
