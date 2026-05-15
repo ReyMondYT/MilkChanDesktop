@@ -22,9 +22,23 @@ if sys.platform.startswith('linux'):
     os.environ['OPENCV_VIDEOIO_PRIORITY_MSMF'] = '0'
     os.environ['OPENCV_VIDEOIO_PRIORITY_V4L2'] = '0'
     
-    # Set Qt plugin path to empty to prevent cv2's plugins from loading
-    if 'QT_PLUGIN_PATH' in os.environ:
-        del os.environ['QT_PLUGIN_PATH']
+    # Ensure PyQt5 plugins are preferred over OpenCV-bundled Qt plugins
+    try:
+        import PyQt5
+
+        pyqt5_path = os.path.dirname(PyQt5.__file__)
+        qt_plugin_path = os.path.join(pyqt5_path, 'Qt5', 'plugins')
+        os.environ['QT_PLUGIN_PATH'] = qt_plugin_path
+
+        qpa_plugin_path = os.path.join(qt_plugin_path, 'platforms')
+        os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = qpa_plugin_path
+    except Exception:
+        pass
+
+    # If OpenCV set a conflicting QPA plugin path, remove it
+    qpa_path = os.environ.get('QT_QPA_PLATFORM_PLUGIN_PATH', '')
+    if 'cv2' in qpa_path or 'opencv' in qpa_path:
+        del os.environ['QT_QPA_PLATFORM_PLUGIN_PATH']
 
 # Ensure project root is in path
 ROOT_DIR = Path(__file__).parent.parent

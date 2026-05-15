@@ -1,11 +1,21 @@
 import os
 from typing import Dict, Optional, Tuple
 
-import cv2
 import numpy as np
+
+cv2 = None
+
+
+def _get_cv2():
+    global cv2
+    if cv2 is None:
+        import cv2 as _cv2
+        cv2 = _cv2
+    return cv2
 
 
 def _read_bgr(path: str, max_width: int = 960) -> Optional[np.ndarray]:
+    cv2 = _get_cv2()
     if not path or not os.path.exists(path):
         return None
     img = cv2.imread(path, cv2.IMREAD_COLOR)
@@ -19,6 +29,7 @@ def _read_bgr(path: str, max_width: int = 960) -> Optional[np.ndarray]:
 
 
 def _rectangularity(contour: np.ndarray) -> float:
+    cv2 = _get_cv2()
     if contour is None or len(contour) < 3:
         return 0.0
     area = cv2.contourArea(contour)
@@ -28,6 +39,7 @@ def _rectangularity(contour: np.ndarray) -> float:
 
 
 def _edge_density(mask: np.ndarray, roi: Tuple[int, int, int, int]) -> float:
+    cv2 = _get_cv2()
     x, y, w, h = roi
     if w <= 0 or h <= 0:
         return 0.0
@@ -36,6 +48,7 @@ def _edge_density(mask: np.ndarray, roi: Tuple[int, int, int, int]) -> float:
 
 
 def _hsv_hist_diff(a_bgr: np.ndarray, b_bgr: np.ndarray) -> float:
+    cv2 = _get_cv2()
     ah = cv2.cvtColor(a_bgr, cv2.COLOR_BGR2HSV)
     bh = cv2.cvtColor(b_bgr, cv2.COLOR_BGR2HSV)
     # 2D histogram on H and S for robustness
@@ -51,6 +64,7 @@ def _hsv_hist_diff(a_bgr: np.ndarray, b_bgr: np.ndarray) -> float:
 
 
 def _orb_keypoint_delta(a_bgr: np.ndarray, b_bgr: np.ndarray) -> Tuple[int, int, int]:
+    cv2 = _get_cv2()
     orb = cv2.ORB_create(nfeatures=800)
     kp1, des1 = orb.detectAndCompute(a_bgr, None)
     kp2, des2 = orb.detectAndCompute(b_bgr, None)
@@ -65,6 +79,7 @@ def _orb_keypoint_delta(a_bgr: np.ndarray, b_bgr: np.ndarray) -> Tuple[int, int,
 
 
 def _largest_changed_region(a_gray: np.ndarray, b_gray: np.ndarray) -> Tuple[Optional[Tuple[int, int, int, int]], float, float]:
+    cv2 = _get_cv2()
     # Difference mask
     delta = cv2.absdiff(a_gray, b_gray)
     # Normalize to 0..255
@@ -105,6 +120,7 @@ def detect_highlight(before_path: str, after_path: str) -> Dict:
       - bbox: [ymin, xmin, ymax, xmax] or [] if N/A
       - score: float 0..1 importance
     """
+    cv2 = _get_cv2()
     a = _read_bgr(before_path)
     b = _read_bgr(after_path)
     if a is None or b is None:
