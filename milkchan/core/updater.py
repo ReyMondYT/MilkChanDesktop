@@ -104,18 +104,24 @@ class AutoUpdater:
                 return user_framework
             
             # No update in user data, use bundled version (read-only)
-            bundled_path = Path(meipass) / "milkchan" / "sentientmilk_framework"
-            if bundled_path.exists() and (bundled_path / "ai.py").exists():
-                return bundled_path
+            for bundled_path in (
+                Path(meipass) / "sentientmilk_framework",
+                Path(meipass) / "milkchan" / "sentientmilk_framework",
+            ):
+                if bundled_path.exists() and (bundled_path / "ai.py").exists():
+                    return bundled_path
             
             # Need to download to user data
             user_framework.mkdir(parents=True, exist_ok=True)
             return user_framework
         else:
             # Development mode - update source folder directly
-            dev_path = current_file.parent.parent / "sentientmilk_framework"
-            if dev_path.exists() and (dev_path / "ai.py").exists():
-                return dev_path
+            for dev_path in (
+                current_file.parent.parent / "sentientmilk_framework",
+                current_file.parent.parent.parent / "sentientmilk_framework",
+            ):
+                if dev_path.exists() and (dev_path / "ai.py").exists():
+                    return dev_path
             
             # Fallback to user data
             from milkchan.bootstrap import get_user_data_dir

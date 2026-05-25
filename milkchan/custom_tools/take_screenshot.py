@@ -20,7 +20,13 @@ def run(resize_factor: str = "0.35"):
         resize_factor: Factor to resize image (as string, will be converted)
     """
     try:
+        from milkchan.core.config import load_config
+        from milkchan.desktop.utils.vision import support_images_enabled
         from milkchan.desktop.utils.screenshot import take_screenshot
+
+        if not support_images_enabled(load_config()):
+            return {"error": "Image support is disabled in settings."}
+
         try:
             rf = float(resize_factor)
             rf = max(0.1, min(1.0, rf))

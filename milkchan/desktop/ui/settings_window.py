@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QCheckBox, QDesktopWidget, QTabWidget, QGroupBox, QLineEdit
 )
 from milkchan.bootstrap import get_assets_dir
+from milkchan.desktop.utils.vision import support_images_enabled, normalize_image_support_config
 
 ASSETS_DIR = str(get_assets_dir())
 FONT_PATH = os.path.join(ASSETS_DIR, 'Retro Gaming.ttf')
@@ -280,7 +281,6 @@ class APITab(QWidget):
         self._fetching = False
         self._models_loaded = False
         self._saved_chat_model = None
-        self._saved_vision_model = None
         self._build_ui()
         # Don't fetch models until after load_values() is called
 
@@ -323,24 +323,6 @@ class APITab(QWidget):
         chat_wrap.setLayout(chat_layout)
         form.addRow('Chat Model:', chat_wrap)
 
-        # Vision Model
-        self.vision_model_combo = QComboBox()
-        self.vision_model_combo.setEditable(True)
-        self.vision_model_combo.setMinimumHeight(32)
-        # Models will be populated from API on load
-        vision_refresh_btn = QPushButton('🔄')
-        vision_refresh_btn.setMinimumHeight(32)
-        vision_refresh_btn.setMaximumWidth(40)
-        vision_refresh_btn.setToolTip('Refresh models')
-        vision_refresh_btn.clicked.connect(lambda: self._fetch_models_async())
-        vision_layout = QHBoxLayout()
-        vision_layout.addWidget(self.vision_model_combo)
-        vision_layout.addWidget(vision_refresh_btn)
-        vision_layout.setSpacing(5)
-        vision_wrap = QWidget()
-        vision_wrap.setLayout(vision_layout)
-        form.addRow('Vision Model:', vision_wrap)
-        
         # GitHub Token (for private framework repo updates)
         self.github_token_edit = QLineEdit()
         self.github_token_edit.setPlaceholderText('ghp_... (optional, for private repo updates)')
@@ -366,7 +348,8 @@ class APITab(QWidget):
         def fetch_thread():
             try:
                 api_key = self.api_key_edit.text().strip()
-                base_url = self.base_url_edit.text().strip()
+                from milkchan.desktop.services.ai_client import normalize_base_url
+                base_url = normalize_base_url(self.base_url_edit.text())
                 
                 from milkchan.desktop.services.model_fetcher import get_available_models
                 models = get_available_models(api_key if api_key else None, base_url if base_url else None)
@@ -398,8 +381,7 @@ class APITab(QWidget):
         """Update combo boxes with fetched models"""
         # Save current text before clearing (in case user typed something)
         current_chat = self.chat_model_combo.currentText().strip()
-        current_vision = self.vision_model_combo.currentText().strip()
-        
+
         if not models:
             self.status_label.setText('No models from API - you can type manually')
             # Keep whatever user has typed
@@ -409,12 +391,6 @@ class APITab(QWidget):
         self.chat_model_combo.clear()
         for m in models:
             self.chat_model_combo.addItem(m)
-
-        # Update vision model combo
-        self.vision_model_combo.clear()
-        for m in models:
-            # Add all models to vision - user can choose any
-            self.vision_model_combo.addItem(m)
 
         # RESTORE current text or saved values
         # Priority: current text > saved value > first model
@@ -431,19 +407,6 @@ class APITab(QWidget):
                 self.chat_model_combo.addItem(self._saved_chat_model)
                 self.chat_model_combo.setCurrentText(self._saved_chat_model)
 
-        if current_vision:
-            # User had typed something, preserve it
-            if self.vision_model_combo.findText(current_vision) < 0:
-                self.vision_model_combo.addItem(current_vision)
-            self.vision_model_combo.setCurrentText(current_vision)
-        elif hasattr(self, '_saved_vision_model') and self._saved_vision_model:
-            index = self.vision_model_combo.findText(self._saved_vision_model)
-            if index >= 0:
-                self.vision_model_combo.setCurrentIndex(index)
-            else:
-                self.vision_model_combo.addItem(self._saved_vision_model)
-                self.vision_model_combo.setCurrentText(self._saved_vision_model)
-
         self.status_label.setText(f'Loaded {len(models)} models from API')
 
     def load_values(self, cfg: dict):
@@ -456,13 +419,10 @@ class APITab(QWidget):
 
         # Store saved values BEFORE doing anything else
         self._saved_chat_model = cfg.get('openai_chat_model', '')
-        self._saved_vision_model = cfg.get('openai_vision_model', '')
 
         # Set current selections from saved config
         if self._saved_chat_model:
             self.chat_model_combo.setCurrentText(self._saved_chat_model)
-        if self._saved_vision_model:
-            self.vision_model_combo.setCurrentText(self._saved_vision_model)
 
         # Fetch models after loading saved values
         if cfg.get('openai_api_key'):
@@ -471,9 +431,9 @@ class APITab(QWidget):
     def save_values(self, cfg: dict):
         # Only save non-empty values to avoid overwriting existing config
         api_key = self.api_key_edit.text().strip()
-        base_url = self.base_url_edit.text().strip()
+        from milkchan.desktop.services.ai_client import normalize_base_url
+        base_url = normalize_base_url(self.base_url_edit.text())
         chat_model = self.chat_model_combo.currentText().strip()
-        vision_model = self.vision_model_combo.currentText().strip()
         github_token = self.github_token_edit.text().strip()
         
         if api_key:
@@ -482,8 +442,7 @@ class APITab(QWidget):
             cfg['openai_base_url'] = base_url
         if chat_model:
             cfg['openai_chat_model'] = chat_model
-        if vision_model:
-            cfg['openai_vision_model'] = vision_model
+        cfg.pop('openai_vision_model', None)
         
         # Save GitHub token to updates config
         if 'updates' not in cfg:
@@ -602,11 +561,9 @@ class VisionTab(QWidget):
         form.setFormAlignment(Qt.AlignLeft)
         form.setSpacing(10)
 
-        # Capture mode
-        self.capture_mode_combo = QComboBox()
-        self.capture_mode_combo.addItem('Video (video + audio)', 'video')
-        self.capture_mode_combo.addItem('Image (screenshots only)', 'image')
-        form.addRow('Capture Mode', self.capture_mode_combo)
+        self.support_images_chk = QCheckBox('Support Images?')
+        self.support_images_chk.setToolTip('When enabled, MilkChan may attach screenshots to AI messages. When disabled, only text and tools are used.')
+        form.addRow('', self.support_images_chk)
 
         # Resize factor
         self.resize_spin = QDoubleSpinBox()
@@ -615,33 +572,19 @@ class VisionTab(QWidget):
         self.resize_spin.setRange(0.25, 1.00)
         form.addRow('Resize Factor', self.resize_spin)
 
-        # Screenshot on disabled
-        self.sshot_chk = QCheckBox('Take one screenshot when vision is disabled')
-        form.addRow('', self.sshot_chk)
-
         layout.addLayout(form)
         layout.addStretch()
 
     def load_values(self, cfg: dict):
         proc = cfg.get('processing', {})
-        mode = proc.get('vision_mode', 'video')
-        
-        for i in range(self.capture_mode_combo.count()):
-            if self.capture_mode_combo.itemData(i) == mode:
-                self.capture_mode_combo.setCurrentIndex(i)
-                break
-        
+        self.support_images_chk.setChecked(support_images_enabled(cfg))
         self.resize_spin.setValue(float(proc.get('video_resize_factor', 0.5)))
-        self.sshot_chk.setChecked(bool(proc.get('screenshot_on_disabled_vision', True)))
 
     def save_values(self, cfg: dict):
         cfg.setdefault('processing', {})
-        mode = self.capture_mode_combo.currentData() or 'video'
-        cfg['processing']['vision_mode'] = mode
-        cfg['processing']['vision_enabled'] = mode == 'video'
-        cfg['processing']['audio_enabled'] = mode == 'video'
+        cfg['processing']['support_images'] = self.support_images_chk.isChecked()
         cfg['processing']['video_resize_factor'] = float(self.resize_spin.value())
-        cfg['processing']['screenshot_on_disabled_vision'] = self.sshot_chk.isChecked()
+        normalize_image_support_config(cfg)
 
 
 class ProactiveTab(QWidget):

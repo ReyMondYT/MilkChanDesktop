@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Optional, Tuple
 from PIL import Image
 import mss
+from milkchan.bootstrap import get_user_data_dir
 
-RECORDINGS_DIR = Path(__file__).resolve().parent.parent / 'recordings'
+RECORDINGS_DIR = get_user_data_dir() / 'recordings'
 TEMP_DIR = RECORDINGS_DIR / 'temp'
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 

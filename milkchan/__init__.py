@@ -9,7 +9,7 @@ Everything you need in one package:
 
 Usage:
     python -m milkchan.main       # Full unified app
-    python run_milkchan.py        # Alternative launcher
+    ./run.sh                      # Source checkout launcher
 """
 
 __version__ = "1.0.0"

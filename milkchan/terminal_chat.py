@@ -380,6 +380,16 @@ def format_tool_result(result: Any) -> str:
         return ""
     
     if isinstance(result, dict):
+        if {"returncode", "stdout", "stderr"}.issubset(result.keys()):
+            parts = [f"returncode: {result.get('returncode')}"]
+            stdout = (result.get('stdout') or '').strip()
+            stderr = (result.get('stderr') or '').strip()
+            if stdout:
+                parts.append(f"stdout:\n{_truncate_tool_text(stdout)}")
+            if stderr:
+                parts.append(f"stderr:\n{_truncate_tool_text(stderr)}")
+            return "\n".join(parts)
+
         # For web_search results, show count of results
         if 'results' in result:
             count = len(result['results'])
@@ -394,11 +404,15 @@ def format_tool_result(result: Any) -> str:
     elif isinstance(result, list):
         return f"[{len(result)} items]"
     elif isinstance(result, str):
-        if len(result) > 100:
-            return result[:100] + "..."
-        return result
+        return _truncate_tool_text(result)
     else:
-        return str(result)[:100]
+        return _truncate_tool_text(str(result))
+
+
+def _truncate_tool_text(text: str, limit: int = 2000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n... [truncated {len(text) - limit} chars]"
 
 
 def display_tools(tools: List[Dict]):

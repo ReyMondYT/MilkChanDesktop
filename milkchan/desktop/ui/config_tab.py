@@ -87,12 +87,6 @@ class ConfigTab(QWidget):
         # Models will be populated from API or user can type manually
         form.addRow('Chat Model:', self.chat_model)
         
-        # Vision Model
-        self.vision_model = QComboBox()
-        self.vision_model.setEditable(True)
-        # Models will be populated from API or user can type manually
-        form.addRow('Vision Model:', self.vision_model)
-        
         layout.addLayout(form)
         
         # Buttons
@@ -119,7 +113,6 @@ class ConfigTab(QWidget):
         self.openai_key.setText(self.env_vars.get('OPENAI_API_KEY', ''))
         self.openai_base.setText(self.env_vars.get('OPENAI_BASE_URL', ''))
         self.chat_model.setCurrentText(self.env_vars.get('OPENAI_CHAT_MODEL', ''))
-        self.vision_model.setCurrentText(self.env_vars.get('OPENAI_VISION_MODEL', ''))
 
     def _on_save(self):
         """Save and prompt restart"""
@@ -135,7 +128,6 @@ class ConfigTab(QWidget):
             'OPENAI_API_KEY': self.openai_key.text().strip(),
             'OPENAI_BASE_URL': self.openai_base.text().strip(),
             'OPENAI_CHAT_MODEL': self.chat_model.currentText().strip(),
-            'OPENAI_VISION_MODEL': self.vision_model.currentText().strip(),
         }
         self._save_env(env)
         reload_config()
@@ -145,4 +137,3 @@ class ConfigTab(QWidget):
         self.openai_key.setText('')
         self.openai_base.setText('')
         self.chat_model.setCurrentText('')
-        self.vision_model.setCurrentText('')

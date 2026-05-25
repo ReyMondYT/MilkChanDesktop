@@ -100,6 +100,24 @@ _persona_cache = None
 _last_emotion: Dict[str, Any] = {}
 
 
+def normalize_base_url(base_url: str) -> str:
+    """Return the OpenAI-compatible API root, not a concrete endpoint."""
+    value = (base_url or "").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/completions", "/models"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].rstrip("/")
+    return value
+
+
+def is_api_configured() -> bool:
+    config = _get_config()
+    return bool(
+        (config.openai_api_key or "").strip()
+        and normalize_base_url(config.openai_base_url)
+        and (config.openai_chat_model or "").strip()
+    )
+
+
 def _clear_sentientmilk_modules():
     """Remove previously loaded sentientmilk_framework modules to force reload."""
     to_remove = [name for name in sys.modules if name == 'sentientmilk_framework' or name.startswith('sentientmilk_framework.')]
@@ -183,9 +201,9 @@ def _get_llm():
     if _llm is None:
         config = _get_config()
 
-        api_key = config.openai_api_key
-        base_url = config.openai_base_url
-        model = config.openai_chat_model
+        api_key = (config.openai_api_key or "").strip()
+        base_url = normalize_base_url(config.openai_base_url)
+        model = (config.openai_chat_model or "").strip()
 
         if not api_key or not base_url or not model:
             raise ValueError("API credentials not configured")
@@ -194,8 +212,10 @@ def _get_llm():
         LLM, Settings = _load_framework_from_user_data()
 
         if LLM is None or Settings is None:
-            # Use bundled framework
-            from milkchan.sentientmilk_framework import LLM, Settings
+            try:
+                from sentientmilk_framework import LLM, Settings
+            except ImportError:
+                from milkchan.sentientmilk_framework import LLM, Settings
 
         # Find custom_tools path (prefer user data in both modes)
         from milkchan.bootstrap import get_user_data_dir
@@ -285,6 +305,25 @@ def _emit_tool_event(event: Dict[str, Any]):
             logger.warning(f"Failed to emit tool event: {e}")
 
 
+def _tool_result_preview(result: Any, limit: int = 500) -> str:
+    try:
+        if isinstance(result, dict):
+            if {"returncode", "stdout", "stderr"}.issubset(result.keys()):
+                stdout = (result.get("stdout") or "").strip()
+                stderr = (result.get("stderr") or "").strip()
+                text = f"returncode={result.get('returncode')} stdout={stdout!r} stderr={stderr!r}"
+            else:
+                text = json.dumps(result, ensure_ascii=False)
+        else:
+            text = str(result)
+    except Exception:
+        text = repr(result)
+
+    if len(text) > limit:
+        return text[:limit] + f"... [truncated {len(text) - limit} chars]"
+    return text
+
+
 def _tool_event_handler(event: Dict[str, Any]):
     """Handle tool events from SentientMilk framework and capture them for display"""
     global _captured_tools
@@ -306,7 +345,7 @@ def _tool_event_handler(event: Dict[str, Any]):
         _emit_tool_event({**tool_data, 'type': 'tool_start'})
         
     elif event_type == 'tool_end':
-        logger.info(f"[TOOL] Completed: {tool_name}")
+        logger.info(f"[TOOL] Completed: {tool_name} -> {_tool_result_preview(event.get('result', ''))}")
         # Update the last tool with the result
         for tool in reversed(_captured_tools):
             if tool['tool_name'] == tool_name and tool['status'] == 'running':
@@ -340,6 +379,17 @@ def chat_respond(
 
     t0 = time.perf_counter()
     config = _get_config()
+    if not is_api_configured():
+        return ChatResult(
+            response="",
+            emotion=None,
+            error=create_error(
+                "config_missing",
+                "API credentials are not configured",
+                "Open settings and set API key, base URL, and chat model before sending messages.",
+            ),
+            tools=[],
+        )
 
     # Reset sprite state for new conversation turn
     from milkchan.custom_tools.update_sprite import reset_sprite_state
@@ -442,7 +492,10 @@ def chat_respond(
         
         # Check for HTTP errors with status code
         if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
-            error = classify_http_error(e.response.status_code, str(getattr(e, 'url', '')))
+            response_text = getattr(e.response, "text", "") or ""
+            error = classify_http_error(e.response.status_code, str(getattr(e.response, 'url', getattr(e, 'url', ''))))
+            if response_text:
+                error["details"] = f"{error.get('details') or ''}\n{response_text[:1000]}".strip()
         elif '429' in str(e) or 'Too Many Requests' in str(e):
             error = classify_http_error(429)
         elif '401' in str(e) or 'Unauthorized' in str(e):

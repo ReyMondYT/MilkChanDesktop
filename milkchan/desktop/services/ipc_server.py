@@ -243,42 +243,12 @@ class IPCServer:
         return {'error': f'Unknown command: {command}'}
 
     def _handle_chat(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        from milkchan.desktop.services import ai_client, memory_client
-        from milkchan.core.config import load_config
-
         user_message = params.get('message', '')
-        history = params.get('history', [])
-        username = params.get('username', 'User')
 
         try:
-            config = load_config()
-            processing = config.get('processing', {})
-            vision_mode = processing.get('vision_mode', 'image')
-            ss_when_disabled = processing.get('screenshot_on_disabled_vision', True)
+            from milkchan.desktop.agents.agent_workers import send_message
 
-            screenshot_path = None
-            should_screenshot = bool(user_message) and (
-                vision_mode in ('video', 'image') or
-                (not processing.get('vision_enabled', True) and ss_when_disabled)
-            )
-
-            if should_screenshot:
-                try:
-                    from milkchan.desktop.utils.screenshot import take_screenshot
-                    rf = float(processing.get('video_resize_factor', 0.35))
-                    ss = take_screenshot(rf)
-                    if ss:
-                        screenshot_path, width, height = ss
-                        logger.info(f"[IPC] screenshot: {screenshot_path} ({width}x{height})")
-                except Exception as e:
-                    logger.warning(f"[IPC] screenshot failed: {e}")
-
-            result = ai_client.chat_respond(
-                user_message=user_message,
-                history=history,
-                username=username,
-                image_path=screenshot_path
-            )
+            result = send_message(user_message, None)
 
             response = result.get('response', '')
             emotion = result.get('emotion')
@@ -290,19 +260,6 @@ class IPCServer:
                     'status': 'error',
                     'error': error
                 }
-
-            history.append({'role': 'user', 'content': user_message})
-            history.append({'role': 'assistant', 'content': response})
-            memory_client.update_history(history)
-            logger.info(f"[IPC] saved {len(history)} messages to history")
-
-            if screenshot_path:
-                try:
-                    import os
-                    if os.path.exists(screenshot_path):
-                        os.remove(screenshot_path)
-                except Exception:
-                    pass
 
             return {
                 'status': 'ok',

@@ -27,6 +27,7 @@ from milkchan.desktop.agents.agent_workers import (
     SemanticProactiveWorker,
 )
 from milkchan.desktop.utils.screen_watcher import ScreenWatcher
+from milkchan.desktop.utils.vision import normalize_image_support_config
 from milkchan.desktop.services.ipc_server import get_ipc_server
 from milkchan.bootstrap import get_assets_dir, is_cache_valid
 
@@ -123,19 +124,13 @@ class SpriteWindow(QMainWindow):
         self.chat_overlay = ChatOverlay(self, self.config)
 
         self.background_recorder = BackgroundRecorder(config=self.config)
-        # Apply capture mode (vision_mode: 'video' or 'image')
+        # Screenshots are captured on demand; continuous video/audio recording is off.
+        normalize_image_support_config(self.config)
         proc_cfg = (self.config.get('processing') or {})
-        vision_mode = proc_cfg.get('vision_mode') or ('video' if proc_cfg.get('vision_enabled', True) else 'image')
         self.background_recorder.processing_config = proc_cfg
         self.background_recorder.video_resize_factor = proc_cfg.get('video_resize_factor', 1.0)
-        if vision_mode == 'video':
-            self.background_recorder.vision_enabled = True
-            self.background_recorder.audio_enabled = True
-            self.background_recorder.start_recording()
-        else:
-            self.background_recorder.vision_enabled = False
-            self.background_recorder.audio_enabled = False
-            # In image mode, screenshots provide context instead of live recording
+        self.background_recorder.vision_enabled = False
+        self.background_recorder.audio_enabled = False
 
         # Timers and workers
         self.proactive_message_timer = QTimer(self)
@@ -302,10 +297,6 @@ class SpriteWindow(QMainWindow):
         else:
             print('Showing window and resuming background processes...')
             self.show()
-            proc_cfg = (self.config.get('processing') or {})
-            vision_mode = proc_cfg.get('vision_mode') or ('video' if proc_cfg.get('vision_enabled', True) else 'image')
-            if vision_mode == 'video' and not getattr(self.background_recorder, 'recording', False):
-                self.background_recorder.start_recording()
             if self.screen_watcher:
                 self.screen_watcher.set_paused(False)
                 # Update ignore region on show
@@ -372,9 +363,16 @@ class SpriteWindow(QMainWindow):
             self.update_position()
 
     def schedule_proactive_message(self):
-        # Always schedule random proactive pings (video-describe tail)
+        # Schedule random proactive pings only when enabled and AI is configured.
         self.proactive_message_timer.stop()
         if getattr(self, 'overlay_paused', False):
+            return
+        if not bool((self.config.get('proactive') or {}).get('enabled', True)):
+            print("[SpriteWindow] proactive disabled in config")
+            return
+        from milkchan.desktop.services.ai_client import is_api_configured
+        if not is_api_configured():
+            print("[SpriteWindow] proactive skipped: API config missing")
             return
         import random as _r
         # Random interval: 10s .. 120s
@@ -399,6 +397,10 @@ class SpriteWindow(QMainWindow):
         if ipc.is_tui_active():
             print("[SpriteWindow] proactive skipped: TUI active")
             self.schedule_proactive_message()
+            return
+        from milkchan.desktop.services.ai_client import is_api_configured
+        if not is_api_configured():
+            print("[SpriteWindow] proactive skipped: API config missing")
             return
 
         self.thinking = True
@@ -530,16 +532,20 @@ class SpriteWindow(QMainWindow):
 
     @pyqtSlot()
     def start_speech_animation(self):
+        was_speaking = self.is_speaking
         self.is_speaking = True
         interval = max(100, int(self.chat_overlay.char_delay * 2.0))
         self.mouth_timer.start(interval)
-        # Play narration audio if available
         try:
-            if hasattr(self.chat_overlay, 'audio_player'):
-                self.chat_overlay.audio_player.stop()
-                self.chat_overlay.audio_player.play()
-        except Exception:
-            pass
+            player = getattr(self.chat_overlay, 'audio_player', None)
+            if player and player.is_available():
+                if was_speaking:
+                    player.ensure_playing()
+                else:
+                    player.stop()
+                    player.play()
+        except Exception as exc:
+            print(f"[Audio] Failed to start narration: {exc}")
 
     @pyqtSlot()
     def stop_speech_animation(self):
@@ -582,11 +588,8 @@ class SpriteWindow(QMainWindow):
         menu.exec_(self.mapToGlobal(event.pos()))
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        # Only resume if in video mode
-        proc_cfg = (self.config.get('processing') or {})
-        vision_mode = proc_cfg.get('vision_mode') or ('video' if proc_cfg.get('vision_enabled', True) else 'image')
-        if was_recording and vision_mode == 'video':
-            self.background_recorder.start_recording()
+        if was_recording:
+            self.background_recorder.stop_recording()
 
     def open_settings(self):
         was_recording = self.background_recorder.recording
@@ -638,19 +641,10 @@ class SpriteWindow(QMainWindow):
         proc_cfg = self.config.get('processing', {}) or {}
         self.background_recorder.config = self.config
         self.background_recorder.processing_config = proc_cfg
-        vision_mode = proc_cfg.get('vision_mode') or ('video' if proc_cfg.get('vision_enabled', True) else 'image')
         self.background_recorder.video_resize_factor = proc_cfg.get('video_resize_factor', 1.0)
-
-        if vision_mode == 'video':
-            self.background_recorder.vision_enabled = True
-            self.background_recorder.audio_enabled = True
-            self.background_recorder.start_recording()
-        else:
-            self.background_recorder.vision_enabled = False
-            self.background_recorder.audio_enabled = False
-            self.background_recorder.stop_recording()
-            # Image mode relies on screenshots; ensure setting is on for legacy behavior
-            proc_cfg['screenshot_on_disabled_vision'] = bool(proc_cfg.get('screenshot_on_disabled_vision', True))
+        self.background_recorder.vision_enabled = False
+        self.background_recorder.audio_enabled = False
+        self.background_recorder.stop_recording()
 
         # Update watcher with latest config
         if self.screen_watcher:
@@ -678,33 +672,19 @@ class SpriteWindow(QMainWindow):
                 self.config['position'][k] = new_pos[k]
                 cfg_changed = True
 
-        # Processing updates: prefer vision_mode; keep other keys
+        # Processing updates: support_images is authoritative; legacy keys are normalized.
         self.config.setdefault('processing', {})
         new_proc = new_cfg.get('processing', {}) or {}
 
-        # New keys and core fields
-        for k in ['vision_mode', 'video_resize_factor', 'screenshot_on_disabled_vision']:
+        for k in ['support_images', 'video_resize_factor']:
             if k in new_proc and diff(self.config['processing'].get(k), new_proc.get(k)):
                 self.config['processing'][k] = new_proc[k]
                 proc_changed = True
 
-        # Legacy mapping: vision_enabled/audio_enabled -> vision_mode
-        if 'vision_enabled' in new_proc:
-            mapped_mode = 'video' if new_proc.get('vision_enabled') else 'image'
-            if diff(self.config['processing'].get('vision_mode'), mapped_mode):
-                self.config['processing']['vision_mode'] = mapped_mode
-                proc_changed = True
-
-        if new_proc.get('audio_enabled') is False:
-            if diff(self.config['processing'].get('vision_mode'), 'image'):
-                self.config['processing']['vision_mode'] = 'image'
-                proc_changed = True
-
-        # Preserve legacy flags too (for components that still read them)
-        for legacy_k in ['vision_enabled', 'audio_enabled']:
-            if legacy_k in new_proc and diff(self.config['processing'].get(legacy_k), new_proc.get(legacy_k)):
-                self.config['processing'][legacy_k] = new_proc[legacy_k]
-                proc_changed = True
+        before_proc = dict(self.config['processing'])
+        normalize_image_support_config(self.config)
+        if self.config['processing'] != before_proc:
+            proc_changed = True
 
         return cfg_changed, proc_changed
 
@@ -771,9 +751,9 @@ class SpriteWindow(QMainWindow):
                         'Update applied successfully!\n\nThe application will now restart.'
                     )
                     
-                    # Restart the application
-                    import subprocess
-                    subprocess.Popen([sys.executable, '-m', 'milkchan.main'])
+                    # Restart through a clean PyInstaller environment in frozen builds.
+                    from milkchan.process import restart_app
+                    restart_app()
                     QApplication.quit()
                 else:
                     QMessageBox.critical(

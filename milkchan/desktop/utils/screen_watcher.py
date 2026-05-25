@@ -6,7 +6,9 @@ import numpy as np
 from PIL import Image
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from milkchan.core.config import load_config
 from milkchan.desktop.utils.screenshot import take_screenshot
+from milkchan.desktop.utils.vision import support_images_enabled
 
 
 class ScreenWatcher(QThread):
@@ -113,6 +115,9 @@ class ScreenWatcher(QThread):
         while not self._stop:
             try:
                 if self._paused or not self.enabled:
+                    time.sleep(self.sample_interval)
+                    continue
+                if not support_images_enabled(load_config()):
                     time.sleep(self.sample_interval)
                     continue
 

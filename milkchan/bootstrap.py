@@ -1,9 +1,10 @@
 """
-Bootstrap module - First-run setup for MilkChan
+Bootstrap module - First-run setup for MilkChan.
 
-Creates ~/.milkchan folder and copies assets on first run.
-Shows progress dialog during setup.
-Pre-caches sprites for fast startup.
+Runtime files are stored under XDG directories on Linux:
+data/cache/database in ``~/.local/share/milkchan`` and editable config in
+``~/.config/milkchan/config.json`` unless XDG environment variables override
+those locations.
 """
 
 import os
@@ -22,13 +23,26 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# User data directory
-USER_DATA_DIR = Path.home() / '.milkchan'
+APP_DIR_NAME = 'milkchan'
+LEGACY_USER_DATA_DIR = Path.home() / '.milkchan'
+
+
+def _xdg_dir(env_name: str, default_relative: str) -> Path:
+    value = os.environ.get(env_name)
+    if value:
+        return Path(value).expanduser()
+    return Path.home() / default_relative
+
+
+# XDG-compatible user directories. Runtime assets/cache/database live in data;
+# editable user configuration lives in config.
+USER_DATA_DIR = _xdg_dir('XDG_DATA_HOME', '.local/share') / APP_DIR_NAME
+USER_CONFIG_DIR = _xdg_dir('XDG_CONFIG_HOME', '.config') / APP_DIR_NAME
 
 # Subdirectories
 ASSETS_DIR = USER_DATA_DIR / 'assets'
 SPRITES_DIR = ASSETS_DIR / 'sprites'
-CONFIG_FILE = USER_DATA_DIR / 'config.json'
+CONFIG_FILE = USER_CONFIG_DIR / 'config.json'
 DB_FILE = USER_DATA_DIR / 'milkchan.db'
 CACHE_FILE = USER_DATA_DIR / 'sprite_cache.pkl'
 FFMPEG_FILE = USER_DATA_DIR / ('ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg')
@@ -49,6 +63,35 @@ FFMPEG_DOWNLOAD_URLS = {
 }
 
 FFMPEG_DOWNLOAD_URL = FFMPEG_DOWNLOAD_URLS.get(sys.platform, FFMPEG_DOWNLOAD_URLS['linux'])
+
+
+def _copy_file_if_missing(src: Path, dst: Path) -> None:
+    if src.exists() and not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def _copy_dir_if_missing(src: Path, dst: Path) -> None:
+    if src.exists() and not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dst)
+
+
+def migrate_legacy_user_data() -> bool:
+    """Best-effort explicit migration from the old ~/.milkchan layout to XDG paths."""
+    if LEGACY_USER_DATA_DIR == USER_DATA_DIR or not LEGACY_USER_DATA_DIR.exists():
+        return False
+
+    try:
+        _copy_file_if_missing(LEGACY_USER_DATA_DIR / 'config.json', CONFIG_FILE)
+        for filename in ('milkchan.db', 'sprite_cache.pkl', 'ffmpeg', 'ffmpeg.exe', 'updater_state.json'):
+            _copy_file_if_missing(LEGACY_USER_DATA_DIR / filename, USER_DATA_DIR / filename)
+        for dirname in ('assets', 'recordings', 'sentientmilk_framework', 'custom_tools', 'backups'):
+            _copy_dir_if_missing(LEGACY_USER_DATA_DIR / dirname, USER_DATA_DIR / dirname)
+        return True
+    except Exception as exc:
+        logger.warning(f"Legacy user data migration failed: {exc}")
+        return False
 
 
 def get_user_data_dir() -> Path:
@@ -81,6 +124,27 @@ def get_ffmpeg_path() -> Path:
     return FFMPEG_FILE
 
 
+def get_bundled_ffmpeg_path() -> Optional[Path]:
+    """Return bundled FFmpeg path when running from a packaged build."""
+    base = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
+    filename = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+    for candidate in (base / 'bin' / filename, base / filename):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def install_bundled_ffmpeg() -> bool:
+    bundled_ffmpeg = get_bundled_ffmpeg_path()
+    if not bundled_ffmpeg:
+        return False
+    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(bundled_ffmpeg, FFMPEG_FILE)
+    if sys.platform != 'win32':
+        FFMPEG_FILE.chmod(0o755)
+    return True
+
+
 def is_ffmpeg_installed() -> bool:
     """Check if FFmpeg is available (system PATH or user data)"""
     if shutil.which('ffmpeg'):
@@ -101,6 +165,7 @@ def download_ffmpeg(
         return True
 
     try:
+        USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
         logger.info("Downloading FFmpeg...")
         print("[Bootstrap] Downloading FFmpeg...")
         
@@ -447,10 +512,10 @@ def setup_user_data(
 
         # Always download FFmpeg for self-contained setup
         if not FFMPEG_FILE.exists():
-            logger.info("Downloading FFmpeg...")
+            logger.info("Installing FFmpeg...")
             if progress_callback:
-                progress_callback(0, 100, "Downloading FFmpeg...")
-            if not download_ffmpeg(progress_callback):
+                progress_callback(0, 100, "Installing FFmpeg...")
+            if not install_bundled_ffmpeg() and not download_ffmpeg(progress_callback):
                 logger.warning("FFmpeg download failed, vision features may require system FFmpeg")
 
         logger.info(f"Setup complete: {USER_DATA_DIR}")
@@ -601,6 +666,7 @@ def ensure_setup() -> bool:
         print("[Bootstrap] Rebuilding sprite cache...")
         _cache_sprites_with_progress()
     if not FFMPEG_FILE.exists():
-        print("[Bootstrap] FFmpeg not in user data, downloading...")
-        download_ffmpeg()
+        print("[Bootstrap] FFmpeg not in user data, installing...")
+        if not install_bundled_ffmpeg():
+            download_ffmpeg()
     return True

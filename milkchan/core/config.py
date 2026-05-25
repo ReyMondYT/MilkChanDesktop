@@ -1,6 +1,7 @@
-"""Unified configuration system for MilkChan
+"""Unified configuration system for MilkChan.
 
-All settings stored in ~/.milkchan/config.json
+Settings are stored in the XDG config directory, normally
+``~/.config/milkchan/config.json`` on Linux.
 """
 
 import os
@@ -15,7 +16,7 @@ from milkchan.bootstrap import get_config_path, get_user_data_dir
 
 
 class Config:
-    """Unified configuration manager - all settings in ~/.milkchan/config.json"""
+    """Unified configuration manager for the XDG config file."""
     
     def __init__(self, config_path: Optional[str] = None):
         self.config_path = config_path or str(get_config_path())
@@ -23,7 +24,7 @@ class Config:
         self.load()
     
     def _find_config_file(self) -> str:
-        """Find config.json - prefer user data dir"""
+        """Return the canonical config.json path."""
         user_config = get_config_path()
         if user_config.exists():
             return str(user_config)
@@ -43,15 +44,15 @@ class Config:
             "openai_api_key": "",
             "openai_base_url": "",
             "openai_chat_model": "",
-            "openai_vision_model": "",
 
             "processing": {
+                "support_images": True,
                 "vision_mode": "image",
                 "vision_enabled": True,
-                "audio_enabled": True,
+                "audio_enabled": False,
                 "video_resize_factor": 0.35,
                 "buffer_seconds": 10,
-                "screenshot_on_disabled_vision": True,
+                "screenshot_on_disabled_vision": False,
                 "total_first_reply_budget_sec": 15.0,
                 "force_wait_for_emotion": True,
                 "emotion_wait_timeout_sec": 6.0,
@@ -68,7 +69,7 @@ class Config:
             },
 "updates": {
             "auto_check": True,
-            "auto_update": False,
+            "auto_update": True,
             "check_interval_hours": 24,
             "github_repo": "obezbolen67/SentientMilk",
             "branch": "master",
@@ -116,6 +117,7 @@ class Config:
             except Exception:
                 pass  # Don't fail save if backup fails
         
+        config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(self._config, f, indent=4)
     
@@ -178,15 +180,6 @@ class Config:
         self._config["openai_chat_model"] = value
         self.save()
     
-    @property
-    def openai_vision_model(self) -> str:
-        return self._config.get("openai_vision_model", "")
-
-    @openai_vision_model.setter
-    def openai_vision_model(self, value: str):
-        self._config["openai_vision_model"] = value
-        self.save()
-
     # Service URLs
     @property
     def ai_service_url(self) -> str:

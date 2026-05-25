@@ -13,14 +13,16 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from milkchan.desktop.services import ai_client, memory_client
 from milkchan.core.config import load_config
 from milkchan.desktop.utils.screenshot import take_screenshot, downscale_image_for_upload
+from milkchan.desktop.utils.vision import support_images_enabled
 from PIL import Image, ImageChops
 from milkchan.desktop.utils.highlights import detect_highlight
 
 
-class SendMessageResult(TypedDict):
+class SendMessageResult(TypedDict, total=False):
     response: str
     emotion: Optional[Dict]
     error: Optional[Dict]
+    tools: List[Dict[str, Any]]
 
 
 def send_message(message: str, video_filepath: Optional[str] = None) -> SendMessageResult:
@@ -29,19 +31,23 @@ def send_message(message: str, video_filepath: Optional[str] = None) -> SendMess
     print(f"[send_message] start; text_len={len(message)}; has_video={bool(video_filepath)}")
 
     config = load_config()
+    if not ai_client.is_api_configured():
+        return SendMessageResult(
+            response="",
+            emotion=None,
+            error={
+                "type": "config_missing",
+                "message": "API credentials are not configured",
+                "details": "Open settings and set API key, base URL, and chat model.",
+            },
+        )
     processing = (config.get('processing') or {})
 
     history = memory_client.get_history()
 
-    vision_mode = processing.get('vision_mode') or ('video' if processing.get('vision_enabled', True) else 'image')
-    ss_when_disabled = bool(processing.get('screenshot_on_disabled_vision', True))
-
     screenshot_path = None
     width = height = None
-    should_screenshot = bool(message) and (
-        vision_mode in ('video', 'image') or
-        (not processing.get('vision_enabled', True) and ss_when_disabled)
-    )
+    should_screenshot = bool(message) and support_images_enabled(config)
     if should_screenshot:
         try:
             rf = float(processing.get('video_resize_factor', 0.35))
@@ -57,7 +63,7 @@ def send_message(message: str, video_filepath: Optional[str] = None) -> SendMess
 
     user_message_for_ai = message
 
-    image_to_send = screenshot_path
+    image_to_send = screenshot_path if support_images_enabled(config) else None
     proc_cfg = (config.get('processing') or {})
     if image_to_send and os.path.exists(image_to_send):
         rf = float(proc_cfg.get('video_resize_factor', 0.35))
@@ -107,7 +113,7 @@ def send_message(message: str, video_filepath: Optional[str] = None) -> SendMess
             pass
 
     print(f"[send_message] done in {time.perf_counter()-t0:.2f}s")
-    return SendMessageResult(response=model_message, emotion=emotion, error=error)
+    return SendMessageResult(response=model_message, emotion=emotion, error=error, tools=result.get('tools', []))
 
 
 def _percent_image_diff(path_a: str, path_b: str, resize_side: int = 256) -> float:
@@ -183,12 +189,12 @@ def send_semantic_proactive(change_summary: str, image_filepath: Optional[str]) 
         "Respond in 2-3 in-character sentences as MilkChan."
     )
 
-    image_to_send = image_filepath
+    image_to_send = image_filepath if support_images_enabled(config) else None
     try:
-        if image_filepath and os.path.exists(image_filepath):
+        if image_to_send and os.path.exists(image_to_send):
             rf = float((config.get('processing') or {}).get('video_resize_factor', 0.35))
             max_dim = max(600, int(1200 * min(1.0, max(0.25, rf))))
-            image_to_send = downscale_image_for_upload(image_filepath, max_dim=max_dim)
+            image_to_send = downscale_image_for_upload(image_to_send, max_dim=max_dim)
 
         result = ai_client.chat_respond(
             user_message=user_message_for_ai,
@@ -259,12 +265,14 @@ class ProactiveMessageWorker(QThread):
 
     def run(self):
         try:
-            print("[ProactiveMessageWorker] saving tail and generating proactive message...")
+            print("[ProactiveMessageWorker] generating proactive message...")
+            config = load_config()
             video_tail = None
-            try:
-                video_tail = self.recorder.save_tail(seconds=4)
-            except Exception:
-                video_tail = None
+            if support_images_enabled(config) and self.recorder and getattr(self.recorder, 'recording', False):
+                try:
+                    video_tail = self.recorder.save_tail(seconds=4)
+                except Exception:
+                    video_tail = None
             description = None
             if video_tail and os.path.exists(video_tail):
                 try:
@@ -354,6 +362,9 @@ class SemanticProactiveWorker(QThread):
             # Block other proactive flows until this one finishes
             with self.__class__._global_send_lock:
                 cfg = load_config()
+                if not support_images_enabled(cfg):
+                    print("[SemanticProactiveWorker] image support disabled; skipping screen-change proactive message.")
+                    return
                 proc = (cfg.get('processing') or {})
                 proactive_cfg = (cfg.get('proactive') or {})
                 rf = float(proc.get('video_resize_factor', 0.35))
@@ -461,6 +472,9 @@ class SemanticProactiveWorker(QThread):
 
     def _run_continuous(self):
         cfg = load_config()
+        if not support_images_enabled(cfg):
+            print("[SemanticProactiveWorker] image support disabled; continuous screen monitoring is off.")
+            return
         proactive_cfg = (cfg.get('proactive') or {})
         sample_interval = float(proactive_cfg.get('sample_interval_ms', 1000)) / 1000.0
         min_interval = float(proactive_cfg.get('min_interval_sec', 15.0))
@@ -676,6 +690,8 @@ class AgenticTaskWorker(QThread):
                 # Use the configured downscale factor for screenshot capture
                 from milkchan.desktop.utils.config import load_config as _load_cfg
                 _cfg = _load_cfg()
+                if not support_images_enabled(_cfg):
+                    raise RuntimeError('Image support is disabled; cannot capture a follow-up screenshot.')
                 _rf = float((_cfg.get('processing') or {}).get('video_resize_factor', 0.35))
                 from milkchan.desktop.utils.screenshot import take_screenshot as _shot
                 ss = _shot(_rf)

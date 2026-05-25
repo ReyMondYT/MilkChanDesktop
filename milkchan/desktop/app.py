@@ -99,10 +99,13 @@ def main():
     updater = get_updater(
         auto_check=updates_config.get('auto_check', True),
         check_interval_hours=updates_config.get('check_interval_hours', 24),
-        auto_update=updates_config.get('auto_update', False),
+        auto_update=True,
         github_token=updates_config.get('github_token', ''),
         on_update_available=on_update_available
     )
+
+    if updater.auto_check:
+        updater.check_for_updates(force=True)
     
     # Start automatic update checking
     if updater.auto_check:

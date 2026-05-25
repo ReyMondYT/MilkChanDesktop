@@ -6,12 +6,12 @@ import subprocess
 import tempfile
 import markdown2
 from pathlib import Path
-from PyQt5.QtCore import Qt, QTimer, QUrl, QSize, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, QSize, pyqtSignal
 from PyQt5.QtGui import QFont, QFontDatabase, QTextCursor, QPixmap
-from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
 from PyQt5.QtWidgets import QWidget, QLabel, QTextEdit, QTextBrowser, QPushButton, QSizePolicy
 from milkchan.desktop.services import ai_client
 from milkchan.desktop.utils.sprites import load_sprite_mappings, build_sprite_tree_string
+from milkchan.desktop.utils.audio_player import NarrationPlayer
 from milkchan.bootstrap import get_assets_dir
 
 ASSETS_DIR = str(get_assets_dir())
@@ -53,14 +53,11 @@ class ChatOverlay(QWidget):
         self.displayed_chars = 0
         self.char_delay = self.config.get('char_delay_ms', 50)
 
-        self.audio_player = QMediaPlayer()
-        if os.path.exists(NARRATION_PATH):
-            url = QUrl.fromLocalFile(os.path.abspath(NARRATION_PATH))
-            self.audio_player.setMedia(QMediaContent(url))
-            # Loop audio while speaking
-            self._audio_looper = QTimer(self)
-            self._audio_looper.timeout.connect(self._loop_audio_if_speaking)
-            self._audio_looper.start(100)
+        self.audio_player = NarrationPlayer(NARRATION_PATH)
+        print(f"[Audio] backend={self.audio_player.backend_name()} available={self.audio_player.is_available()} path={NARRATION_PATH}")
+        self._audio_looper = QTimer(self)
+        self._audio_looper.timeout.connect(self._loop_audio_if_speaking)
+        self._audio_looper.start(100)
 
         self.worker = None
         self.timer_reset_for_this_message = False
@@ -76,8 +73,8 @@ class ChatOverlay(QWidget):
     def _loop_audio_if_speaking(self):
         """Restart audio if we're still speaking and audio has stopped"""
         if self.parent() and hasattr(self.parent(), 'is_speaking'):
-            if self.parent().is_speaking and self.audio_player.state() != QMediaPlayer.PlayingState:
-                self.audio_player.play()
+            if self.parent().is_speaking:
+                self.audio_player.ensure_playing()
 
     def setup_ui(self):
         self.setStyleSheet('background-color: transparent;')
@@ -225,20 +222,30 @@ class ChatOverlay(QWidget):
         self.expand_btn.hide()
         self.hide()
 
+        terminal_args = [python_bin]
+        if getattr(sys, 'frozen', False):
+            terminal_args.extend(['--terminal-chat', self.history_file])
+        else:
+            terminal_args.extend([terminal_script, self.history_file])
+
         if os.name == 'nt':
             self.terminal_process = subprocess.Popen([
-                'cmd', '/c', 'start', '', 'cmd', '/k',
-                python_bin, terminal_script, self.history_file
+                'cmd', '/c', 'start', '', 'cmd', '/k', *terminal_args
             ])
         else:
             terminal_emulator = shutil.which('x-terminal-emulator') or 'x-terminal-emulator'
-            self.terminal_process = subprocess.Popen([
-                terminal_emulator, '-e', python_bin, terminal_script, self.history_file
-            ])
+            from milkchan.runtime_env import external_process_environment
+            self.terminal_process = subprocess.Popen(
+                [terminal_emulator, '-e', *terminal_args],
+                env=external_process_environment(),
+                close_fds=True,
+            )
 
         self._start_terminal_watcher()
 
     def _resolve_terminal_script(self):
+        if getattr(sys, 'frozen', False):
+            return sys.executable
         candidates = []
         candidates.append(Path(__file__).resolve().parent.parent.parent / 'terminal_chat.py')
         meipass = getattr(sys, '_MEIPASS', None)
@@ -250,6 +257,8 @@ class ChatOverlay(QWidget):
         return None
 
     def _resolve_python_for_tui(self):
+        if getattr(sys, 'frozen', False):
+            return sys.executable
         if not getattr(sys, 'frozen', False):
             return sys.executable
         for cmd in ('python', 'python3'):
@@ -429,11 +438,6 @@ class ChatOverlay(QWidget):
         if hasattr(self.parent(), 'ipc_server') and self.parent().ipc_server:
             self.parent().ipc_server.notify_tui_new_message('assistant', response, emotion)
 
-        # Start narration loop, if configured
-        if self.audio_player.mediaStatus() != QMediaPlayer.NoMedia:
-            self.audio_player.stop()
-            self.audio_player.play()
-
         self.response_timer.start(self.char_delay)
 
     def handle_error(self, error: dict):
@@ -446,6 +450,7 @@ class ChatOverlay(QWidget):
             'timeout': "The request took too long. Please try again.",
             'network': "Could not connect to the AI service. Check your network connection.",
             'auth_error': "Authentication failed. Please check your API key configuration.",
+            'config_missing': "API is not configured. Open settings and set API key, base URL, and chat model.",
             'payment_required': "API quota exceeded. Please add credits to your account.",
             'server_error': "The AI service is experiencing issues. Try again later.",
         }
@@ -495,9 +500,8 @@ class ChatOverlay(QWidget):
         # Render markdown live during streaming
         self._render_markdown_streaming()
 
-        if self.audio_player.state() != QMediaPlayer.PlayingState:
-            if self.displayed_chars < len(self.current_response):
-                self.audio_player.play()
+        if self.displayed_chars < len(self.current_response):
+            self.audio_player.ensure_playing()
 
     def _close_unclosed_tags(self, text: str) -> str:
         import re

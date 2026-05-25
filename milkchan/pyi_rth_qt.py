@@ -4,10 +4,12 @@ This ensures PyQt5's Qt plugins are used instead of OpenCV's bundled ones.
 """
 import sys
 import os
+from milkchan.runtime_env import configure_qt_environment
 
 # On Linux, OpenCV bundles Qt plugins that conflict with PyQt5
 # We need to ensure PyQt5's plugins are used by setting QT_PLUGIN_PATH
 if sys.platform.startswith('linux'):
+    configure_qt_environment()
     # Get PyQt5's plugin path
     try:
         import PyQt5

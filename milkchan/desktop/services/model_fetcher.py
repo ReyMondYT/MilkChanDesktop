@@ -41,6 +41,9 @@ def _fetch_ollama_models(base_url: str) -> List[str]:
 
 def _fetch_models_from_api(api_key: str, base_url: Optional[str] = None) -> List[str]:
     """Fetch models from API"""
+    if base_url:
+        from milkchan.desktop.services.ai_client import normalize_base_url
+        base_url = normalize_base_url(base_url)
     # Handle Ollama specially
     if base_url and _is_ollama_endpoint(base_url):
         return _fetch_ollama_models(base_url)
@@ -136,6 +139,9 @@ def get_available_models(api_key: Optional[str] = None, base_url: Optional[str] 
     
     if not base_url:
         base_url = "https://api.openai.com/v1"
+    else:
+        from milkchan.desktop.services.ai_client import normalize_base_url
+        base_url = normalize_base_url(base_url)
     
     # Fetch models from API
     models = _fetch_models_from_api(api_key, base_url)
