@@ -128,11 +128,6 @@ def main():
         return
 
     logger.info("MilkChan v1.0 starting...")
-
-    if sys.platform.startswith("linux"):
-        from milkchan.system_deps import ensure_runtime_system_dependencies
-        if not ensure_runtime_system_dependencies():
-            raise SystemExit(1)
     
     # Run desktop GUI directly - no API server!
     from milkchan.desktop.app import main as desktop_main

@@ -1,6 +1,6 @@
 import os
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 
 def test_normalize_base_url_strips_concrete_endpoints():
@@ -196,3 +196,21 @@ def test_terminal_formats_read_tool_output():
     formatted = format_tool_result("[Ln 1] # HTFDeeds\n[Ln 2] bot\n")
 
     assert "[Ln 1] # HTFDeeds" in formatted
+
+
+def test_normal_gui_start_does_not_install_system_dependencies(monkeypatch):
+    import milkchan.main as milkchan_main
+
+    calls = []
+    fake_desktop_app = ModuleType("milkchan.desktop.app")
+    fake_desktop_app.main = lambda: calls.append("desktop")
+    fake_system_deps = ModuleType("milkchan.system_deps")
+    fake_system_deps.ensure_runtime_system_dependencies = lambda: (_ for _ in ()).throw(AssertionError("sudo path called"))
+
+    monkeypatch.setattr(milkchan_main.sys, "argv", ["MilkChan"])
+    monkeypatch.setitem(sys.modules, "milkchan.desktop.app", fake_desktop_app)
+    monkeypatch.setitem(sys.modules, "milkchan.system_deps", fake_system_deps)
+
+    milkchan_main.main()
+
+    assert calls == ["desktop"]
