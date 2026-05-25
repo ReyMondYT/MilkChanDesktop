@@ -14,6 +14,21 @@ from PyQt5.QtCore import QUrl
 from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
 
 
+_SYSTEM_BIN_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")
+
+
+def _find_executable(name: str) -> Optional[str]:
+    """Find a Debian runtime executable even when desktop launchers provide a thin PATH."""
+    resolved = shutil.which(name)
+    if resolved:
+        return resolved
+    for directory in _SYSTEM_BIN_DIRS:
+        candidate = Path(directory) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 class NarrationPlayer:
     """Play the short MilkChan narration loop while speech animation is active."""
 
@@ -89,18 +104,24 @@ class NarrationPlayer:
     def _select_external_backend(self) -> Optional[List[str]]:
         if not sys.platform.startswith("linux"):
             return None
-        if shutil.which("mpv"):
-            return ["mpv", "--no-video", "--really-quiet", "--no-terminal"]
-        if shutil.which("ffplay"):
-            return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", "-volume", "100"]
-        if shutil.which("gst-play-1.0"):
-            return ["gst-play-1.0", "--no-interactive", "--quiet"]
-        if shutil.which("pw-play"):
-            return ["pw-play"]
-        if shutil.which("paplay"):
-            return ["paplay"]
-        if shutil.which("aplay"):
-            return ["aplay", "-q"]
+        mpv = _find_executable("mpv")
+        if mpv:
+            return [mpv, "--no-video", "--really-quiet", "--no-terminal"]
+        ffplay = _find_executable("ffplay")
+        if ffplay:
+            return [ffplay, "-nodisp", "-autoexit", "-loglevel", "error", "-volume", "100"]
+        gst_play = _find_executable("gst-play-1.0")
+        if gst_play:
+            return [gst_play, "--no-interactive", "--quiet"]
+        pw_play = _find_executable("pw-play")
+        if pw_play:
+            return [pw_play]
+        paplay = _find_executable("paplay")
+        if paplay:
+            return [paplay]
+        aplay = _find_executable("aplay")
+        if aplay:
+            return [aplay, "-q"]
         return None
 
     def _start_external(self) -> None:

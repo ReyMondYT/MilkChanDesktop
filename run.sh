@@ -16,6 +16,6 @@ export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
 export QT_XCB_GL_INTEGRATION="${QT_XCB_GL_INTEGRATION:-none}"
 export QT_OPENGL="${QT_OPENGL:-software}"
 export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
-export PATH="$USER_DATA_DIR:$PATH"
+export PATH="$USER_DATA_DIR:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 exec "$VENV_DIR/bin/python" -m milkchan.main "$@"

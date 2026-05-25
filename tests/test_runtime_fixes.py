@@ -49,6 +49,7 @@ def test_narration_player_prefers_external_linux_backend(monkeypatch, tmp_path):
     audio = tmp_path / "narr.mp3"
     audio.write_bytes(b"fake")
     monkeypatch.setattr(audio_player.sys, "platform", "linux")
+    monkeypatch.setattr(audio_player, "_SYSTEM_BIN_DIRS", ())
     monkeypatch.setattr(audio_player.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "ffplay" else None)
 
     player = NarrationPlayer(str(audio))
@@ -64,7 +65,30 @@ def test_narration_player_prefers_mpv_before_ffplay(monkeypatch, tmp_path):
     audio = tmp_path / "narr.mp3"
     audio.write_bytes(b"fake")
     monkeypatch.setattr(audio_player.sys, "platform", "linux")
+    monkeypatch.setattr(audio_player, "_SYSTEM_BIN_DIRS", ())
     monkeypatch.setattr(audio_player.shutil, "which", lambda name: f"/usr/bin/{name}" if name in {"mpv", "ffplay"} else None)
+
+    player = NarrationPlayer(str(audio))
+
+    assert player.backend_name() == "mpv"
+    assert player.is_available()
+
+
+def test_narration_player_finds_debian_backend_when_path_is_thin(monkeypatch, tmp_path):
+    from milkchan.desktop.utils.audio_player import NarrationPlayer
+    import milkchan.desktop.utils.audio_player as audio_player
+
+    audio = tmp_path / "narr.mp3"
+    audio.write_bytes(b"fake")
+    fake_usr_bin = tmp_path / "usr" / "bin"
+    fake_usr_bin.mkdir(parents=True)
+    fake_mpv = fake_usr_bin / "mpv"
+    fake_mpv.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_mpv.chmod(0o755)
+
+    monkeypatch.setattr(audio_player.sys, "platform", "linux")
+    monkeypatch.setattr(audio_player, "_SYSTEM_BIN_DIRS", (str(fake_usr_bin),))
+    monkeypatch.setattr(audio_player.shutil, "which", lambda name: None)
 
     player = NarrationPlayer(str(audio))
 

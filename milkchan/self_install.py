@@ -45,6 +45,7 @@ def install_current_binary() -> Path:
     launcher.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
+        'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"\n'
         "export QT_QPA_PLATFORM=\"${QT_QPA_PLATFORM:-xcb}\"\n"
         "export QT_XCB_GL_INTEGRATION=\"${QT_XCB_GL_INTEGRATION:-none}\"\n"
         "export QT_OPENGL=\"${QT_OPENGL:-software}\"\n"
