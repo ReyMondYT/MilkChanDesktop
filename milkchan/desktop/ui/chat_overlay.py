@@ -1,24 +1,47 @@
-import os
-import json
-import sys
+"""The chat box drawn over the character: input, typed-out replies and errors."""
+
+import html
+import re
 import shutil
 import subprocess
-import tempfile
-import markdown2
+import sys
 from pathlib import Path
-from PyQt5.QtCore import Qt, QTimer, QSize, pyqtSignal
-from PyQt5.QtGui import QFont, QFontDatabase, QTextCursor, QPixmap
-from PyQt5.QtWidgets import QWidget, QLabel, QTextEdit, QTextBrowser, QPushButton, QSizePolicy
-from milkchan.desktop.services import ai_client
-from milkchan.desktop.utils.sprites import load_sprite_mappings, build_sprite_tree_string
-from milkchan.desktop.utils.audio_player import NarrationPlayer
-from milkchan.bootstrap import get_assets_dir
 
-ASSETS_DIR = str(get_assets_dir())
-FONT_PATH = os.path.join(ASSETS_DIR, 'Retro Gaming.ttf')
-NARRATION_PATH = os.path.join(ASSETS_DIR, 'narr.mp3')
-SPRITES_DIR = os.path.join(ASSETS_DIR, 'sprites')
-OVERLAY_PATH = os.path.join(SPRITES_DIR, 'overlay.png')
+import markdown2
+from PyQt5.QtCore import QSize, Qt, QTimer
+from PyQt5.QtGui import QFont, QFontDatabase, QPixmap
+from PyQt5.QtWidgets import QLabel, QPushButton, QTextBrowser, QTextEdit, QWidget
+
+from milkchan.core.config import get_config
+from milkchan.desktop.agents.agent_workers import ChatWorker
+from milkchan.desktop.utils.audio_player import NarrationPlayer
+from milkchan.paths import get_assets_dir
+from milkchan.runtime_env import external_process_environment
+
+ASSETS_DIR = get_assets_dir()
+FONT_PATH = str(ASSETS_DIR / 'Retro Gaming.ttf')
+NARRATION_PATH = str(ASSETS_DIR / 'narr.mp3')
+OVERLAY_PATH = str(ASSETS_DIR / 'overlay.png')
+TERMINAL_SCRIPT = Path(__file__).resolve().parents[2] / 'terminal_chat.py'
+MARKDOWN_EXTRAS = ['fenced-code-blocks', 'code-friendly', 'tables', 'strike', 'task_list']
+
+CHAT_SURFACE = 'rgba(10, 11, 17, 218)'
+CHAT_BORDER = 'rgba(196, 71, 77, 205)'
+CHAT_TEXT = '#f0dfbd'
+CHAT_MUTED = '#9a9baa'
+
+FRIENDLY_ERRORS = {
+    'rate_limit': "The AI service is busy right now. Please wait a moment and try again.",
+    'timeout': "The request took too long. Please try again.",
+    'network': "Could not connect to the AI service. Check your network connection.",
+    'auth_error': "Authentication failed. Please check your API key configuration.",
+    'config_missing': "No API key yet. Open Settings → Connection and enter it.",
+    'payment_required': "API quota exceeded. Please add credits to your account.",
+    'server_error': "The AI service is experiencing issues. Try again later.",
+    'payload_too_large': "This conversation is too large for the API gateway. "
+                         "Your history is still saved; increase the server request limit or clear history.",
+    'brain_unreachable': "Can't reach SentientMilk, MilkChan's brain. Restart MilkChan to bring it back.",
+}
 
 
 class ChatTextEdit(QTextEdit):
@@ -38,11 +61,9 @@ class ChatTextEdit(QTextEdit):
 
 
 class ChatOverlay(QWidget):
-    terminal_closed = pyqtSignal()
-
-    def __init__(self, parent=None, config=None):
+    def __init__(self, parent):
         super().__init__(parent)
-        self.config = config or {}
+        self.config = get_config()
         self.scale_factor = self.config.get('scale_factor', 100) / 100.0
         self.textbox_left, self.textbox_top = 5, 5
         self.textbox_width, self.textbox_height = 250, 70
@@ -54,77 +75,81 @@ class ChatOverlay(QWidget):
         self.char_delay = self.config.get('char_delay_ms', 50)
 
         self.audio_player = NarrationPlayer(NARRATION_PATH)
-        print(f"[Audio] backend={self.audio_player.backend_name()} available={self.audio_player.is_available()} path={NARRATION_PATH}")
         self._audio_looper = QTimer(self)
         self._audio_looper.timeout.connect(self._loop_audio_if_speaking)
         self._audio_looper.start(100)
 
         self.worker = None
         self.timer_reset_for_this_message = False
-        self.last_emotion = None
-
-        self.chat_history = []
-        self.terminal_process = None
-        self.history_file = None
 
         self.setup_ui()
         self.hide()
 
     def _loop_audio_if_speaking(self):
-        """Restart audio if we're still speaking and audio has stopped"""
-        if self.parent() and hasattr(self.parent(), 'is_speaking'):
-            if self.parent().is_speaking:
-                self.audio_player.ensure_playing()
+        if self.parent().is_speaking:
+            self.audio_player.ensure_playing()
 
     def setup_ui(self):
         self.setStyleSheet('background-color: transparent;')
 
         self.bg_label = QLabel(self)
-        if os.path.exists(OVERLAY_PATH):
-            from PyQt5.QtGui import QPixmap as _QPixmap
-            self.bg_pixmap = _QPixmap(OVERLAY_PATH)
-            self.bg_label.setPixmap(self.bg_pixmap)
+        self.bg_pixmap = QPixmap(OVERLAY_PATH)
+        self.bg_label.setPixmap(self.bg_pixmap)
 
         font_id = QFontDatabase.addApplicationFont(FONT_PATH)
         self.font_family = QFontDatabase.applicationFontFamilies(font_id)[0] if font_id != -1 else 'Arial'
-        # Base font size is treated as PIXELS for crispness and DPI independence
-        self.base_font_size = int(self.config.get('font_size', 6)) if str(self.config.get('font_size', 6)).isdigit() else 6
-
-        self.agent_question_label = QLabel(self)
-        self.agent_question_label.setWordWrap(True)
-        self.agent_question_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.agent_question_label.hide()
+        # Pixels, for crisp text at any DPI.
+        self.base_font_size = int(self.config.get('font_size', 6))
 
         self.user_input = ChatTextEdit(self)
-        self.user_input.setStyleSheet('background-color: rgba(0,0,0,80); color: white; border: none; padding: 8px;')
+        self.user_input.setStyleSheet(f'''
+            QTextEdit {{
+                background: {CHAT_SURFACE}; color: {CHAT_TEXT};
+                border: 1px solid {CHAT_BORDER}; border-radius: 9px;
+                padding: 9px 35px 9px 11px; selection-background-color: #c4474d;
+            }}
+            QTextEdit:focus {{ border: 1px solid #db5960; background: rgba(15, 16, 24, 232); }}
+            QScrollBar:vertical {{ background: transparent; width: 7px; }}
+            QScrollBar::handle:vertical {{ background: #4a3440; border-radius: 3px; min-height: 20px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        ''')
         self.user_input.textChanged.connect(self.on_user_typing)
 
         self.ai_response = QTextBrowser(self)
         self.ai_response.setReadOnly(True)
         self.ai_response.setAcceptRichText(True)
         self.ai_response.setOpenExternalLinks(True)
-        self.ai_response.setStyleSheet('background-color: rgba(0,0,0,80); color: #e6e6e6; border: none; padding: 8px;')
+        self.ai_response.setStyleSheet(f'''
+            QTextBrowser {{
+                background: {CHAT_SURFACE}; color: {CHAT_TEXT};
+                border: 1px solid rgba(40, 185, 177, 165); border-radius: 9px;
+                padding: 9px 35px 9px 11px;
+            }}
+            QScrollBar:vertical {{ background: transparent; width: 7px; }}
+            QScrollBar::handle:vertical {{ background: #275651; border-radius: 3px; min-height: 20px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        ''')
         self.ai_response.installEventFilter(self)
         self.ai_response.hide()
 
-        self.expand_btn = QPushButton('[ ]', self)
+        self.expand_btn = QPushButton('↗', self)
         self.expand_btn.setFixedSize(24, 24)
         self.expand_btn.setCursor(Qt.PointingHandCursor)
         self.expand_btn.setStyleSheet('''
             QPushButton {
-                background-color: rgba(172, 50, 50, 180);
-                color: #e6e6e6;
-                border: 2px solid #ac3232;
-                border-radius: 4px;
+                background-color: rgba(23, 25, 37, 225);
+                color: #f0dfbd;
+                border: 1px solid rgba(196, 71, 77, 210);
+                border-radius: 7px;
                 font-family: 'Retro Gaming', monospace;
                 font-size: 12px;
             }
             QPushButton:hover {
-                background-color: #c23b3b;
-                border-color: #c23b3b;
+                background-color: #c4474d;
+                border-color: #db5960;
             }
         ''')
-        self.expand_btn.setToolTip('Expand to terminal')
+        self.expand_btn.setToolTip('Open extended chat')
         self.expand_btn.hide()
         self.expand_btn.clicked.connect(self._open_terminal_chat)
         self.expand_btn.raise_()
@@ -133,25 +158,16 @@ class ChatOverlay(QWidget):
         self._btn_hover_timer.setSingleShot(True)
         self._btn_hover_timer.timeout.connect(self._check_hover)
 
-        # Initial sizing, fonts and placement
+        self.apply_config()
+
+    def apply_config(self):
+        """Pick up settings and the active character."""
+        self.base_font_size = int(self.config.get('font_size', 6))
+        self.char_delay = self.config.get('char_delay_ms', 50)
+        self.user_input.setPlaceholderText(
+            f'Talk to {self.parent().character.name}…    Enter to send  ·  Shift+Enter for a new line'
+        )
         self.update_scale(self.config.get('scale_factor', 100))
-        self.update_textbox_position()
-
-    def ask_agent_question(self, question: str):
-        self.show()
-        self.ai_response.hide()
-        self.agent_question_label.show()
-        self.user_input.show()
-        self.user_input.clear()
-        formatted = f'<p style="color: #FF4444;">{question}</p><p style="color: #44FF44;">Answer:</p>'
-        self.agent_question_label.setText(formatted)
-        self.user_input.setFocus()
-
-    def hide_agent_question(self):
-        self.agent_question_label.hide()
-        self.user_input.clear()
-        self.hide()
-        self.parent().setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
     def eventFilter(self, obj, event):
         if obj is self.ai_response and event.type() == event.KeyPress:
@@ -164,8 +180,6 @@ class ChatOverlay(QWidget):
         return super().eventFilter(obj, event)
 
     def on_user_typing(self):
-        if self.parent().is_answering_agent:
-            return
         is_empty = not self.user_input.toPlainText()
         if not is_empty and not self.timer_reset_for_this_message:
             self.parent().schedule_proactive_message()
@@ -189,117 +203,27 @@ class ChatOverlay(QWidget):
             self._btn_hover_timer.start(100)
 
     def _open_terminal_chat(self):
-        self._save_history_to_file()
-        terminal_script = self._resolve_terminal_script()
-        python_bin = self._resolve_python_for_tui()
-        if not terminal_script:
-            self.handle_error({
-                'type': 'error',
-                'message': 'Terminal chat script is missing from this build.',
-                'details': 'Rebuild using the updated PyInstaller spec to include milkchan/terminal_chat.py.',
-            })
-            return
-        if not python_bin:
-            self.handle_error({
-                'type': 'error',
-                'message': 'Python interpreter not found for terminal chat.',
-                'details': 'Install Python and ensure it is available in PATH as python or python3.',
-            })
-            return
-
-        # Stop any active response
         self.response_timer.stop()
-        self.audio_player.stop()
-        try:
-            self.parent().stop_speech_animation()
-        except Exception:
-            pass
-
-        # Hide all UI elements
+        self.parent().stop_speech_animation()
         self.user_input.hide()
         self.ai_response.hide()
-        self.agent_question_label.hide()
         self.expand_btn.hide()
         self.hide()
 
-        terminal_args = [python_bin]
         if getattr(sys, 'frozen', False):
-            terminal_args.extend(['--terminal-chat', self.history_file])
+            command = [sys.executable, '--terminal-chat']
         else:
-            terminal_args.extend([terminal_script, self.history_file])
-
-        if os.name == 'nt':
-            self.terminal_process = subprocess.Popen([
-                'cmd', '/c', 'start', '', 'cmd', '/k', *terminal_args
-            ])
+            command = [sys.executable, str(TERMINAL_SCRIPT)]
+        env = external_process_environment()
+        env['MILKCHAN_IPC_TOKEN'] = self.parent().ipc_server.token
+        if sys.platform == 'win32':
+            subprocess.Popen(['cmd', '/c', 'start', '', 'cmd', '/k', *command], env=env)
         else:
-            terminal_emulator = shutil.which('x-terminal-emulator') or 'x-terminal-emulator'
-            from milkchan.runtime_env import external_process_environment
-            self.terminal_process = subprocess.Popen(
-                [terminal_emulator, '-e', *terminal_args],
-                env=external_process_environment(),
-                close_fds=True,
-            )
-
-        self._start_terminal_watcher()
-
-    def _resolve_terminal_script(self):
-        if getattr(sys, 'frozen', False):
-            return sys.executable
-        candidates = []
-        candidates.append(Path(__file__).resolve().parent.parent.parent / 'terminal_chat.py')
-        meipass = getattr(sys, '_MEIPASS', None)
-        if meipass:
-            candidates.append(Path(meipass) / 'milkchan' / 'terminal_chat.py')
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
-        return None
-
-    def _resolve_python_for_tui(self):
-        if getattr(sys, 'frozen', False):
-            return sys.executable
-        if not getattr(sys, 'frozen', False):
-            return sys.executable
-        for cmd in ('python', 'python3'):
-            resolved = shutil.which(cmd)
-            if resolved:
-                return resolved
-        return None
-
-    def _save_history_to_file(self):
-        if self.history_file is None:
-            fd, self.history_file = tempfile.mkstemp(suffix='.json', prefix='milkchan_chat_')
-            os.close(fd)
-        with open(self.history_file, 'w', encoding='utf-8') as f:
-            json.dump(self.chat_history, f)
-
-    def _start_terminal_watcher(self):
-        self._terminal_watcher = QTimer(self)
-        self._terminal_watcher.timeout.connect(self._check_terminal_closed)
-        self._terminal_watcher.start(500)
-
-    def _check_terminal_closed(self):
-        if self.terminal_process and self.terminal_process.poll() is not None:
-            self._terminal_watcher.stop()
-            self._load_history_from_file()
-            self.terminal_process = None
-            # Don't auto-show - let user decide when to open chatbox again
-
-    def _load_history_from_file(self):
-        if self.history_file and os.path.exists(self.history_file):
-            try:
-                with open(self.history_file, 'r', encoding='utf-8') as f:
-                    self.chat_history = json.load(f)
-            except Exception:
-                pass
-
-    def _add_to_history(self, role: str, content: str):
-        self.chat_history.append({'role': role, 'content': content})
+            terminal = shutil.which('x-terminal-emulator') or 'x-terminal-emulator'
+            subprocess.Popen([terminal, '-e', *command], env=env, close_fds=True)
 
     def interrupt_response(self):
         self.response_timer.stop()
-        self.audio_player.stop()
         self.parent().stop_speech_animation()
         self.switch_to_input_mode()
 
@@ -310,8 +234,6 @@ class ChatOverlay(QWidget):
         self.user_input.setFocus()
 
     def position_overlay(self):
-        if not self.parent():
-            return
         x = max(0, (self.parent().width() - self.width()) // 2)
         y = max(0, self.parent().height() - self.height())
         self.move(x, y)
@@ -324,34 +246,24 @@ class ChatOverlay(QWidget):
         geom = (scaled_left, scaled_top, scaled_width, scaled_height)
         self.user_input.setGeometry(*geom)
         self.ai_response.setGeometry(*geom)
-        self.agent_question_label.setGeometry(*geom)
-
-        # Position expand button inside textbox area (top-right)
-        btn_x = scaled_left + scaled_width - self.expand_btn.width() - 4
-        btn_y = scaled_top + 4
-        self.expand_btn.move(btn_x, btn_y)
+        self.expand_btn.move(scaled_left + scaled_width - self.expand_btn.width() - 4, scaled_top + 4)
         self.expand_btn.raise_()
 
     def update_scale(self, scale_percentage: int):
-        # Scale the overlay art but keep text size constant in pixels (decoupled from sprite scale)
+        # The overlay art scales with the character; text keeps its pixel size.
         self.scale_factor = max(0.5, min(3.0, scale_percentage / 100.0))
-
-        if hasattr(self, 'bg_pixmap') and not self.bg_pixmap.isNull():
-            current_sprite_width = int(260 * self.scale_factor)
-            overlay_scale = current_sprite_width / self.bg_pixmap.width()
-            scaled_size = QSize(int(self.bg_pixmap.width() * overlay_scale), int(self.bg_pixmap.height() * overlay_scale))
-            self.bg_label.setPixmap(self.bg_pixmap.scaled(scaled_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        if not self.bg_pixmap.isNull():
+            overlay_scale = int(260 * self.scale_factor) / self.bg_pixmap.width()
+            scaled_size = QSize(int(self.bg_pixmap.width() * overlay_scale),
+                                int(self.bg_pixmap.height() * overlay_scale))
+            self.bg_label.setPixmap(self.bg_pixmap.scaled(scaled_size, Qt.KeepAspectRatio,
+                                                          Qt.SmoothTransformation))
             self.bg_label.resize(scaled_size)
             self.setFixedSize(scaled_size)
-
-        # Use pixel-size fonts for accuracy and crispness; do NOT multiply by scale factor
-        font_size_px = max(int(self.base_font_size), 6)
         font = QFont(self.font_family)
-        font.setPixelSize(font_size_px)
+        font.setPixelSize(max(int(self.base_font_size), 6))
         self.user_input.setFont(font)
         self.ai_response.setFont(font)
-        self.agent_question_label.setFont(font)
-
         self.update_textbox_position()
         if self.isVisible():
             self.position_overlay()
@@ -364,107 +276,51 @@ class ChatOverlay(QWidget):
         text = self.user_input.toPlainText().strip()
         if not text:
             return
-        if self.parent().is_answering_agent:
-            self.parent().provide_answer_to_agent(text)
-            self.hide_agent_question()
-            return
-        self._add_to_history('user', text)
-        
-        # Notify TUI if active
-        if hasattr(self.parent(), 'ipc_server') and self.parent().ipc_server:
-            self.parent().ipc_server.notify_tui_new_message('user', text)
-        
+        self.parent().ipc_server.notify_tui_new_message('user', text)
         self.timer_reset_for_this_message = False
         self.user_input.hide()
         self.ai_response.clear()
         self.ai_response.show()
         self.ai_response.setFocus()
         self.ai_response.setPlainText('Thinking...')
-        self.parent().thinking = True
-        # Disconnect any previous worker's interim emotion to avoid stale updates
-        try:
-            if getattr(self, 'worker', None):
-                try:
-                    self.worker.emotion_ready.disconnect(self.handle_interim_emotion)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        self.worker = self.parent().create_save_send_worker(text)
-        # Reset last_emotion for this turn so new interim updates can apply
-        try:
-            self.last_emotion = None
-        except Exception:
-            pass
+        self.parent().set_thinking(True)
+        self.worker = ChatWorker(text, self)
+        self.worker.response_ready.connect(self.handle_response)
+        self.worker.error.connect(self.handle_error)
+        self.worker.finished.connect(self._forget_worker)
         self.worker.start()
 
-    def handle_interim_emotion(self, emotion: dict):
-        # Apply only valid emotions (pose, mood, variation); skip empty to avoid clobbering sprite state
-        try:
-            payload = emotion.get('emotion') if isinstance(emotion, dict) else None
-            if isinstance(payload, list) and len(payload) >= 3:
-                if getattr(self, 'last_emotion', None) != payload:
-                    print(f"[ChatOverlay] Applying interim emotion: {payload}")
-                    self.parent().update_sprite_emotion(payload)
-                    self.last_emotion = payload
-        except Exception as ex:
-            print(f"[ChatOverlay] handle_interim_emotion error: {ex}")
+    def _forget_worker(self):
+        if self.sender() is self.worker:
+            self.worker = None
 
-    def handle_response(self, response: str, emotion: dict):
+    def handle_response(self, response: str, sprite):
         if not self.isVisible():
             self.parent().setAttribute(Qt.WA_TransparentForMouseEvents, False)
-            self.parent().chat_overlay.position_overlay()
-            self.parent().chat_overlay.show()
+            self.position_overlay()
+            self.show()
             self.user_input.hide()
             self.ai_response.show()
             self.ai_response.setFocus()
-
         self.ai_response.clear()
-
-        # Do not apply final emotion here to avoid double application.
-        # Emotion updates are driven asynchronously (e.g., via emotion_ready/interim events).
-        if emotion:
-            self.handle_interim_emotion(emotion)
-
-        # Now stop thinking and start rendering the text
-        self.parent().thinking = False
+        if sprite:
+            self.parent().set_expression(sprite['pose'], sprite['mood'])
+        self.parent().set_thinking(False)
         self.parent().start_speech_animation()
-
         self.current_response = response
         self.displayed_chars = 0
-        self._add_to_history('assistant', response)
-        
-        # Notify TUI if active
-        if hasattr(self.parent(), 'ipc_server') and self.parent().ipc_server:
-            self.parent().ipc_server.notify_tui_new_message('assistant', response, emotion)
-
+        self.parent().ipc_server.notify_tui_new_message('assistant', response, sprite)
         self.response_timer.start(self.char_delay)
 
     def handle_error(self, error: dict):
-        error_type = error.get('type', 'unknown') if isinstance(error, dict) else 'unknown'
-        error_message = error.get('message', 'An error occurred') if isinstance(error, dict) else str(error)
-        error_details = error.get('details') if isinstance(error, dict) else None
-        
-        friendly_messages = {
-            'rate_limit': "The AI service is busy right now. Please wait a moment and try again.",
-            'timeout': "The request took too long. Please try again.",
-            'network': "Could not connect to the AI service. Check your network connection.",
-            'auth_error': "Authentication failed. Please check your API key configuration.",
-            'config_missing': "API is not configured. Open settings and set API key, base URL, and chat model.",
-            'payment_required': "API quota exceeded. Please add credits to your account.",
-            'server_error': "The AI service is experiencing issues. Try again later.",
-        }
-        
-        display_message = friendly_messages.get(error_type, error_message)
-        
-        print(f"[ChatOverlay] Error: {error_type} - {error_message}")
-        self.ai_response.clear()
-        
-        error_html = f'''
+        error_type = error.get('type', 'unknown')
+        message = html.escape(FRIENDLY_ERRORS.get(error_type, error.get('message') or 'An error occurred'))
+        details = html.escape(error['details']) if error.get('details') else ''
+        self.ai_response.setHtml(f'''
         <style>
             body {{ color: #e6e6e6; font-family: '{self.font_family}', sans-serif; }}
-            .error-container {{ 
-                background-color: rgba(172, 50, 50, 0.3); 
+            .error-container {{
+                background-color: rgba(172, 50, 50, 0.3);
                 border-left: 3px solid #ac3232;
                 padding: 12px;
                 margin: 8px 0;
@@ -476,65 +332,42 @@ class ChatOverlay(QWidget):
         </style>
         <div class="error-container">
             <div class="error-title">Error</div>
-            <div class="error-message">{display_message}</div>
-            {f'<div class="error-details">{error_details}</div>' if error_details else ''}
+            <div class="error-message">{message}</div>
+            {f'<div class="error-details">{details}</div>' if details else ''}
         </div>
-        '''
-        self.ai_response.setHtml(error_html)
-        
-        self.parent().thinking = False
+        ''')
+        self.parent().set_thinking(False)
         self.parent().stop_speech_animation()
-        self.audio_player.stop()
 
     def display_next_chunk(self):
         if self.displayed_chars >= len(self.current_response):
             self.response_timer.stop()
-            self.audio_player.stop()
             self.parent().stop_speech_animation()
-            self._render_markdown()
+            self._render_markdown(self.current_response)
             return
+        self.displayed_chars += min(3, len(self.current_response) - self.displayed_chars)
+        self._render_markdown(self.current_response[:self.displayed_chars], partial=True)
 
-        chunk_size = min(3, len(self.current_response) - self.displayed_chars)
-        self.displayed_chars += chunk_size
-        
-        # Render markdown live during streaming
-        self._render_markdown_streaming()
-
-        if self.displayed_chars < len(self.current_response):
-            self.audio_player.ensure_playing()
-
-    def _close_unclosed_tags(self, text: str) -> str:
-        import re
+    @staticmethod
+    def _close_unclosed_tags(text: str) -> str:
         open_tags = []
-        tag_pattern = re.compile(r'<(/?\w+)[^>]*>')
-        for match in tag_pattern.finditer(text):
+        for match in re.finditer(r'<(/?\w+)[^>]*>', text):
             tag = match.group(1)
-            if tag.startswith('/'):
-                tag_name = tag[1:]
-                if open_tags and open_tags[-1] == tag_name:
-                    open_tags.pop()
-            else:
+            if not tag.startswith('/'):
                 open_tags.append(tag)
-        for tag in reversed(open_tags):
-            text += f'</{tag}>'
-        return text
+            elif open_tags and open_tags[-1] == tag[1:]:
+                open_tags.pop()
+        return text + ''.join(f'</{tag}>' for tag in reversed(open_tags))
 
-    def _render_markdown_streaming(self):
-        text_so_far = self.current_response[:self.displayed_chars]
-        
-        try:
-            html = markdown2.markdown(
-                text_so_far,
-                extras=['fenced-code-blocks', 'code-friendly', 'tables', 'strike', 'task_list']
-            )
-            html = self._close_unclosed_tags(html)
-        except Exception:
-            html = text_so_far.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
-        
-        styled_html = f'''
+    def _render_markdown(self, text: str, partial: bool = False):
+        # Raw HTML in a reply is shown as text, never rendered.
+        body = markdown2.markdown(text, extras=MARKDOWN_EXTRAS, safe_mode='escape')
+        if partial:
+            body = self._close_unclosed_tags(body)
+        self.ai_response.setHtml(f'''
         <style>
-            body {{ color: #e6e6e6; font-family: '{self.font_family}', sans-serif; }}
-            h1, h2, h3, h4, h5, h6 {{ color: #ff6b6b; margin-top: 12px; margin-bottom: 6px; }}
+            body {{ color: {CHAT_TEXT}; font-family: '{self.font_family}', sans-serif; }}
+            h1, h2, h3, h4, h5, h6 {{ color: #db5960; margin-top: 12px; margin-bottom: 6px; }}
             h1 {{ font-size: 1.4em; }}
             h2 {{ font-size: 1.2em; }}
             h3 {{ font-size: 1.1em; }}
@@ -560,100 +393,30 @@ class ChatOverlay(QWidget):
                 padding: 0;
             }}
             blockquote {{
-                border-left: 3px solid #ac3232;
+                border-left: 3px solid #c4474d;
                 margin: 8px 0;
                 padding-left: 12px;
-                color: #9a9a9a;
+                color: {CHAT_MUTED};
             }}
             ul, ol {{ margin: 6px 0; padding-left: 20px; }}
             li {{ margin: 2px 0; }}
-            a {{ color: #8be9fd; text-decoration: none; }}
-            strong {{ color: #ffb86c; }}
+            a {{ color: #28b9b1; text-decoration: none; }}
+            strong {{ color: #f0dfbd; }}
             em {{ color: #f1fa8c; }}
             hr {{ border: none; border-top: 1px solid #3a3a4e; margin: 12px 0; }}
         </style>
-        {html}
-        '''
-        self.ai_response.setHtml(styled_html)
-        self._scroll_to_bottom()
-
-    def _scroll_to_bottom(self):
+        {body}
+        ''')
         scrollbar = self.ai_response.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def _render_markdown(self):
-        html = markdown2.markdown(
-            self.current_response,
-            extras=['fenced-code-blocks', 'code-friendly', 'tables', 'strike', 'task_list']
-        )
-        styled_html = f'''
-        <style>
-            body {{ color: #e6e6e6; font-family: '{self.font_family}', sans-serif; }}
-            h1, h2, h3, h4, h5, h6 {{ color: #ff6b6b; margin-top: 12px; margin-bottom: 6px; }}
-            h1 {{ font-size: 1.4em; }}
-            h2 {{ font-size: 1.2em; }}
-            h3 {{ font-size: 1.1em; }}
-            p {{ margin: 6px 0; }}
-            code {{
-                background-color: #2a2a3e;
-                color: #ff79c6;
-                padding: 2px 6px;
-                border-radius: 4px;
-                font-family: '{self.font_family}', sans-serif !important;
-            }}
-            pre {{
-                background-color: #1a1a2e;
-                border: 1px solid #3a3a4e;
-                border-radius: 6px;
-                padding: 10px;
-                overflow-x: auto;
-                margin: 8px 0;
-            }}
-            pre code {{
-                background-color: transparent;
-                color: #f8f8f2;
-                padding: 0;
-            }}
-            blockquote {{
-                border-left: 3px solid #ac3232;
-                margin: 8px 0;
-                padding-left: 12px;
-                color: #9a9a9a;
-            }}
-            ul, ol {{ margin: 6px 0; padding-left: 20px; }}
-            li {{ margin: 2px 0; }}
-            a {{ color: #8be9fd; text-decoration: none; }}
-            strong {{ color: #ffb86c; }}
-            em {{ color: #f1fa8c; }}
-            hr {{ border: none; border-top: 1px solid #3a3a4e; margin: 12px 0; }}
-        </style>
-        {html}
-        '''
-        self.ai_response.setHtml(styled_html)
-        self._scroll_to_bottom()
-
     def hide_overlay(self):
         self.response_timer.stop()
-        self.audio_player.stop()
         self.parent().stop_speech_animation()
-
-        if self.worker and self.worker.isRunning():
-            try:
-                self.worker.response_ready.disconnect()
-                self.worker.error.disconnect()
-                # Also disconnect interim emotion to avoid stray signals
-                self.worker.emotion_ready.disconnect()
-            except Exception:
-                pass
-
-        proactive_worker = self.parent().proactive_worker
-        if proactive_worker and proactive_worker.isRunning():
-            try:
-                proactive_worker.response_ready.disconnect()
-                proactive_worker.error.disconnect()
-            except Exception:
-                pass
-            self.parent().schedule_proactive_message()
-
-        self.agent_question_label.hide()
+        if self.worker:
+            # The reply is still saved to history; it is just not shown.
+            self.worker.response_ready.disconnect(self.handle_response)
+            self.worker.error.disconnect(self.handle_error)
+            self.worker = None
+            self.parent().set_thinking(False)
         self.hide()

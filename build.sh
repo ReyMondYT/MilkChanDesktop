@@ -4,7 +4,6 @@ set -Eeuo pipefail
 APP_NAME="MilkChan"
 SENTIENTMILK_REPO="https://github.com/obezbolen67/SentientMilk.git"
 SENTIENTMILK_BRANCH="${SENTIENTMILK_BRANCH:-master}"
-FFMPEG_URL_AMD64="${FFMPEG_URL_AMD64:-https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz}"
 NATIVE_BUILD=0
 
 if [ "${1:-}" = "--native" ]; then
@@ -17,7 +16,6 @@ VENV_DIR="$ROOT_DIR/build/.venv-build"
 BUILD_VENDOR_DIR="$ROOT_DIR/build/vendor"
 FRAMEWORK_PARENT="$BUILD_VENDOR_DIR/SentientMilk"
 FRAMEWORK_DIR="$FRAMEWORK_PARENT/sentientmilk_framework"
-FFMPEG_BIN="$BUILD_VENDOR_DIR/bin/ffmpeg"
 SPEC_FILE="$ROOT_DIR/MilkChan.spec"
 DIST_BIN="$ROOT_DIR/dist/$APP_NAME"
 
@@ -188,26 +186,6 @@ sync_sentientmilk() {
   [ -f "$FRAMEWORK_DIR/__init__.py" ] || die "SentientMilk framework package was not found after clone."
 }
 
-download_ffmpeg() {
-  if [ -x "$FFMPEG_BIN" ]; then
-    log "Build FFmpeg already exists at $FFMPEG_BIN"
-    return
-  fi
-
-  log "Downloading FFmpeg for release bundle."
-  local tmp_dir archive extracted
-  tmp_dir="$(mktemp -d)"
-  archive="$tmp_dir/ffmpeg.tar.xz"
-  curl -L --fail --retry 3 -o "$archive" "$FFMPEG_URL_AMD64"
-  tar -C "$tmp_dir" -xf "$archive"
-  extracted="$(find "$tmp_dir" -type f -name ffmpeg -perm /111 | head -n 1)"
-  [ -n "$extracted" ] || die "Downloaded FFmpeg archive did not contain an executable."
-  mkdir -p "$(dirname "$FFMPEG_BIN")"
-  cp "$extracted" "$FFMPEG_BIN"
-  chmod 755 "$FFMPEG_BIN"
-  rm -rf "$tmp_dir"
-}
-
 prepare_python_env() {
   if [ ! -x "$VENV_DIR/bin/python" ]; then
     log "Creating virtual environment at $VENV_DIR"
@@ -225,7 +203,6 @@ build_binary() {
 
   log "Building one-file release binary."
   SENTIENTMILK_FRAMEWORK_PARENT="$FRAMEWORK_PARENT" \
-  MILKCHAN_FFMPEG_PATH="$FFMPEG_BIN" \
     "$VENV_DIR/bin/pyinstaller" --noconfirm --clean "$SPEC_FILE"
 
   [ -x "$DIST_BIN" ] || die "PyInstaller did not create $DIST_BIN"
@@ -238,7 +215,6 @@ main() {
   require_debian_amd64
   install_system_packages
   sync_sentientmilk
-  download_ffmpeg
   prepare_python_env
   build_binary
 

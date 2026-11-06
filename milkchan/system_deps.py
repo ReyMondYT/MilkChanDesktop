@@ -8,12 +8,10 @@ import subprocess
 import sys
 from typing import Iterable, List, Sequence, Tuple
 
-
 PACKAGE_GROUPS: Sequence[Sequence[str]] = (
     ("ca-certificates",),
     ("curl",),
     ("git",),
-    ("ffmpeg",),
     ("mpv",),
     ("xterm",),
     ("alsa-utils",),

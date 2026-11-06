@@ -5,7 +5,6 @@ APP_NAME="MilkChan"
 APP_ID="milkchan"
 SENTIENTMILK_REPO="https://github.com/obezbolen67/SentientMilk.git"
 SENTIENTMILK_BRANCH="${SENTIENTMILK_BRANCH:-master}"
-FFMPEG_URL_AMD64="${FFMPEG_URL_AMD64:-https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$ROOT_DIR/.venv"
@@ -13,9 +12,7 @@ XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 USER_DATA_DIR="$XDG_DATA_HOME/$APP_ID"
 USER_CONFIG_DIR="$XDG_CONFIG_HOME/$APP_ID"
-FRAMEWORK_DIR="$USER_DATA_DIR/sentientmilk_framework"
 FRAMEWORK_REPO_DIR="$USER_DATA_DIR/SentientMilk"
-FFMPEG_BIN="$USER_DATA_DIR/ffmpeg"
 INSTALL_DIR="$XDG_DATA_HOME/opt/$APP_ID"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$XDG_DATA_HOME/applications"
@@ -31,7 +28,6 @@ APT_PACKAGES=(
   python3-dev
   python3-pip
   python3-venv
-  ffmpeg
   mpv
   xterm
   alsa-utils
@@ -176,30 +172,7 @@ sync_sentientmilk() {
     git clone --depth 1 --branch "$SENTIENTMILK_BRANCH" "$SENTIENTMILK_REPO" "$FRAMEWORK_REPO_DIR"
   fi
   [ -d "$FRAMEWORK_REPO_DIR/sentientmilk_framework" ] || die "SentientMilk framework package was not found after clone."
-  if [ ! -L "$FRAMEWORK_DIR" ]; then
-    rm -rf "$FRAMEWORK_DIR"
-  fi
-  ln -sfn "$FRAMEWORK_REPO_DIR/sentientmilk_framework" "$FRAMEWORK_DIR"
-}
-
-install_ffmpeg() {
-  if [ -x "$FFMPEG_BIN" ]; then
-    log "Local FFmpeg already exists at $FFMPEG_BIN"
-    return
-  fi
-
-  log "Installing local FFmpeg runtime."
-  local tmp_dir archive extracted
-  tmp_dir="$(mktemp -d)"
-  archive="$tmp_dir/ffmpeg.tar.xz"
-  curl -L --fail --retry 3 -o "$archive" "$FFMPEG_URL_AMD64"
-  tar -C "$tmp_dir" -xf "$archive"
-  extracted="$(find "$tmp_dir" -type f -name ffmpeg -perm /111 | head -n 1)"
-  [ -n "$extracted" ] || die "Downloaded FFmpeg archive did not contain an executable."
-  mkdir -p "$USER_DATA_DIR"
-  cp "$extracted" "$FFMPEG_BIN"
-  chmod 755 "$FFMPEG_BIN"
-  rm -rf "$tmp_dir"
+  "$VENV_DIR/bin/python" -m pip install -e "$FRAMEWORK_REPO_DIR"
 }
 
 install_launchers() {
@@ -213,7 +186,7 @@ export QT_QPA_PLATFORM="\${QT_QPA_PLATFORM:-xcb}"
 export QT_XCB_GL_INTEGRATION="\${QT_XCB_GL_INTEGRATION:-none}"
 export QT_OPENGL="\${QT_OPENGL:-software}"
 export LIBGL_ALWAYS_SOFTWARE="\${LIBGL_ALWAYS_SOFTWARE:-1}"
-export PATH="$USER_DATA_DIR:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\${PATH:-}"
+export PATH="\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\${PATH:-}"
 exec "$ROOT_DIR/run.sh" "\$@"
 EOF
   chmod 755 "$launcher"
@@ -242,7 +215,6 @@ main() {
   install_system_packages
   create_venv
   sync_sentientmilk
-  install_ffmpeg
   install_launchers
 
   log "Source install complete."

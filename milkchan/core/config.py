@@ -1,201 +1,158 @@
-"""Unified configuration system for MilkChan.
+"""MilkChan settings, stored as JSON at the XDG config path."""
 
-Settings are stored in the XDG config directory, normally
-``~/.config/milkchan/config.json`` on Linux.
-"""
-
-import os
+import copy
 import json
-import shutil
+import logging
+import os
+import tempfile
 from pathlib import Path
-from getpass import getuser
-from typing import Optional, Any, Dict
-from datetime import datetime
+from typing import Any, Dict, Optional
 
-from milkchan.bootstrap import get_config_path, get_user_data_dir
+from milkchan.paths import get_config_path
+
+logger = logging.getLogger(__name__)
+
+DEFAULTS: Dict[str, Any] = {
+    "position": {"x_offset": 0, "y_offset": 0},
+    "scale_factor": 100,
+    "font_size": 24,
+    "char_delay_ms": 50,
+    "username": os.getenv("USERNAME") or os.getenv("USER") or "User",
+    "character": "",
+    # The provider, model and tool keys belong to the brain (SentientMilk's settings).
+    "processing": {"support_images": True, "screenshot_scale": 0.35},
+    "proactive": {"enabled": True},
+    "updates": {
+        "auto_check": True,
+        "auto_update": True,
+        "check_interval_hours": 24,
+        "github_token": "",
+    },
+}
+
+_OBSOLETE_KEYS = ("sprite_resolution_scale", "sprite_pack", "ai_service_url", "memory_service_url")
+_OBSOLETE_PROCESSING = (
+    "vision_mode", "vision_enabled", "audio_enabled", "buffer_seconds",
+    "screenshot_on_disabled_vision", "total_first_reply_budget_sec",
+    "force_wait_for_emotion", "emotion_wait_timeout_sec", "emotion_min_wait_sec",
+)
+
+
+def _migrate(loaded: Dict[str, Any]) -> None:
+    """Translate settings written by earlier versions, in place."""
+    for key in _OBSOLETE_KEYS:
+        loaded.pop(key, None)
+    processing = loaded.get("processing")
+    if isinstance(processing, dict):
+        if "support_images" not in processing:
+            mode = processing.get("vision_mode")
+            if mode in ("text", "image", "video"):
+                processing["support_images"] = mode != "text"
+            elif "vision_enabled" in processing or "screenshot_on_disabled_vision" in processing:
+                processing["support_images"] = bool(
+                    processing.get("vision_enabled", True)
+                    or processing.get("screenshot_on_disabled_vision", False)
+                )
+        if "video_resize_factor" in processing:
+            processing.setdefault("screenshot_scale", processing.pop("video_resize_factor"))
+        for key in _OBSOLETE_PROCESSING:
+            processing.pop(key, None)
+    if isinstance(loaded.get("proactive"), dict):
+        loaded["proactive"] = {k: v for k, v in loaded["proactive"].items() if k == "enabled"}
+    if isinstance(loaded.get("updates"), dict):
+        for key in ("github_repo", "branch"):
+            loaded["updates"].pop(key, None)
 
 
 class Config:
-    """Unified configuration manager for the XDG config file."""
-    
     def __init__(self, config_path: Optional[str] = None):
-        self.config_path = config_path or str(get_config_path())
-        self._config: Dict[str, Any] = {}
-        self.load()
-    
-    def _find_config_file(self) -> str:
-        """Return the canonical config.json path."""
-        user_config = get_config_path()
-        if user_config.exists():
-            return str(user_config)
-        return str(user_config)  # Will be created
-    
-    def load(self) -> None:
-        """Load configuration from file"""
-        default_config = {
-            "position": {"x_offset": 0, "y_offset": 0},
-"scale_factor": 100,
-        "font_size": 24,
-            "char_delay_ms": 50,
-            "username": os.getenv("USERNAME") or getuser() or "User",
-            "sprite_resolution_scale": 1.0,
+        self.path = Path(config_path or get_config_path())
+        self._config = self._load()
 
-            # API Configuration - stored in config.json!
-            "openai_api_key": "",
-            "openai_base_url": "",
-            "openai_chat_model": "",
-
-            "processing": {
-                "support_images": True,
-                "vision_mode": "image",
-                "vision_enabled": True,
-                "audio_enabled": False,
-                "video_resize_factor": 0.35,
-                "buffer_seconds": 10,
-                "screenshot_on_disabled_vision": False,
-                "total_first_reply_budget_sec": 15.0,
-                "force_wait_for_emotion": True,
-                "emotion_wait_timeout_sec": 6.0,
-                "emotion_min_wait_sec": 0.5,
-            },
-            "proactive": {
-                "enabled": True,
-                "sample_interval_ms": 1200,
-                "change_threshold": 0.08,
-                "pixel_delta": 0.08,
-                "min_interval_sec": 15.0,
-                "min_change_percent": 6.0,
-                "highlight_score_threshold": 0.55,
-            },
-"updates": {
-            "auto_check": True,
-            "auto_update": True,
-            "check_interval_hours": 24,
-            "github_repo": "obezbolen67/SentientMilk",
-            "branch": "master",
-            "github_token": "",
-        },
-        "tools": {
-            "web_search_token": "",
-        },
-    }
-
-        config_file = Path(self.config_path)
-        if not config_file.exists():
-            self._config = default_config
-            if config_file.parent.exists():
-                self.save()
-            return
-        
+    def _load(self) -> Dict[str, Any]:
+        config = copy.deepcopy(DEFAULTS)
+        if not self.path.exists():
+            return config
         try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                loaded = json.load(f)
-            
-            self._config = default_config.copy()
-            
-            for k, v in loaded.items():
-                if isinstance(v, dict) and k in self._config and isinstance(self._config[k], dict):
-                    self._config[k].update(v)
-                else:
-                    self._config[k] = v
-                    
-        except Exception:
-            self._config = default_config
-    
-    def save(self) -> None:
-        """Save configuration to file with backup"""
-        config_file = Path(self.config_path)
-        
-        # Create backup before overwriting
-        if config_file.exists():
+            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError("top level is not an object")
+        except (OSError, ValueError) as exc:
+            # Keep the unreadable file so a later save cannot destroy its contents.
+            kept = self.path.with_name(self.path.name + ".invalid")
+            logger.error("Config %s is unreadable (%s); kept as %s, using defaults", self.path, exc, kept)
             try:
-                backup_dir = config_file.parent / "backups"
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_path = backup_dir / f"config_backup_{timestamp}.json"
-                shutil.copy(config_file, backup_path)
-            except Exception:
-                pass  # Don't fail save if backup fails
-        
-        config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_path, 'w', encoding='utf-8') as f:
-            json.dump(self._config, f, indent=4)
-    
-    def get(self, key: str, default: Any = None) -> Any:
-        """Get configuration value by dot-notation key"""
-        parts = key.split('.')
-        value = self._config
-        for part in parts:
-            if isinstance(value, dict) and part in value:
-                value = value[part]
+                os.replace(self.path, kept)
+            except OSError:
+                pass
+            return config
+        _migrate(loaded)
+        self._merge(config, loaded)
+        return config
+
+    @staticmethod
+    def _merge(config: Dict[str, Any], data: Dict[str, Any]) -> None:
+        for key, value in data.items():
+            if isinstance(value, dict) and isinstance(config.get(key), dict):
+                config[key].update(copy.deepcopy(value))
             else:
+                config[key] = copy.deepcopy(value)
+
+    def save(self) -> None:
+        """Write atomically: a crash leaves either the old or the new file."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".config-", suffix=".json", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                json.dump(self._config, output, indent=4)
+            os.replace(temporary, self.path)
+        except BaseException:
+            os.unlink(temporary)
+            raise
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Read a value by dot-notation key, e.g. ``processing.support_images``."""
+        value: Any = self._config
+        for part in key.split("."):
+            if not isinstance(value, dict) or part not in value:
                 return default
+            value = value[part]
         return value
-    
+
     def set(self, key: str, value: Any) -> None:
-        """Set configuration value by dot-notation key"""
-        parts = key.split('.')
+        parts = key.split(".")
         current = self._config
         for part in parts[:-1]:
-            if part not in current:
-                current[part] = {}
-            current = current[part]
+            current = current.setdefault(part, {})
         current[parts[-1]] = value
         self.save()
-    
-    def update(self, data: dict) -> None:
-        """Update config with dictionary of values"""
-        for key, value in data.items():
-            if isinstance(value, dict) and key in self._config and isinstance(self._config[key], dict):
-                self._config[key].update(value)
-            else:
-                self._config[key] = value
+
+    def update(self, data: Dict[str, Any]) -> None:
+        self._merge(self._config, data)
         self.save()
-    
-    # API Configuration properties (read/write from config.json)
-    @property
-    def openai_api_key(self) -> str:
-        return self._config.get("openai_api_key", "")
-    
-    @openai_api_key.setter
-    def openai_api_key(self, value: str):
-        self._config["openai_api_key"] = value
-        self.save()
-    
-    @property
-    def openai_base_url(self) -> str:
-        return self._config.get("openai_base_url", "")
-    
-    @openai_base_url.setter
-    def openai_base_url(self, value: str):
-        self._config["openai_base_url"] = value
-        self.save()
-    
-    @property
-    def openai_chat_model(self) -> str:
-        return self._config.get("openai_chat_model", "")
-    
-    @openai_chat_model.setter
-    def openai_chat_model(self, value: str):
-        self._config["openai_chat_model"] = value
-        self.save()
-    
-    # Service URLs
-    @property
-    def ai_service_url(self) -> str:
-        return self._config.get("ai_service_url", "http://localhost:8001")
-    
-    @property
-    def memory_service_url(self) -> str:
-        return self._config.get("memory_service_url", "http://localhost:8002")
+
+    def remove(self, *keys: str) -> None:
+        """Delete dot-notation keys; saves only if something was there."""
+        removed = False
+        for key in keys:
+            *parents, last = key.split(".")
+            container = self._config
+            for part in parents:
+                container = container.get(part) if isinstance(container, dict) else None
+            if isinstance(container, dict) and last in container:
+                del container[last]
+                removed = True
+        if removed:
+            self.save()
+
+    def as_dict(self) -> Dict[str, Any]:
+        return copy.deepcopy(self._config)
 
 
-# Global config instance
 _config: Optional[Config] = None
 
 
 def get_config() -> Config:
-    """Get global config instance"""
     global _config
     if _config is None:
         _config = Config()
@@ -203,19 +160,11 @@ def get_config() -> Config:
 
 
 def reload_config() -> Config:
-    """Reload global config"""
     global _config
     _config = Config()
     return _config
 
 
 def load_config() -> Dict[str, Any]:
-    """Load and return config as dict (for backward compatibility)"""
-    return get_config()._config.copy()
-
-
-def save_config(cfg: Dict[str, Any]) -> None:
-    """Save config dict to file (for backward compatibility)"""
-    config = get_config()
-    config._config = cfg
-    config.save()
+    """An independent copy of the current settings."""
+    return get_config().as_dict()

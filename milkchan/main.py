@@ -1,136 +1,137 @@
 #!/usr/bin/env python3
-"""
-MilkChan v1.0 - Desktop Application
+"""MilkChan entry point: the desktop app, plus a few maintenance commands.
 
-Pure module-based desktop app - NO web servers!
-
-Usage:
-python -m milkchan.main # Run desktop GUI
+    python -m milkchan.main                    run the desktop app
+    python -m milkchan.main --print-paths      show where data and config live
+    MilkChan --serve-brain                     run the SentientMilk brain (how packaged builds start it)
 """
 
-import sys
+import logging
 import os
-from pathlib import Path
+import sys
+
 from milkchan.runtime_env import configure_qt_environment
 
-# Fix Qt plugin conflict on Linux (must be before any Qt imports)
-if sys.platform.startswith('linux'):
-    configure_qt_environment()
-    # Force xcb platform for X11/VNC
-    # Disable OpenCV's Qt integration - use headless
-    os.environ['OPENCV_VIDEOIO_PRIORITY_MSMF'] = '0'
-    os.environ['OPENCV_VIDEOIO_PRIORITY_V4L2'] = '0'
-    
-    # Ensure PyQt5 plugins are preferred over OpenCV-bundled Qt plugins
-    try:
-        import PyQt5
 
-        pyqt5_path = os.path.dirname(PyQt5.__file__)
-        qt_plugin_path = os.path.join(pyqt5_path, 'Qt5', 'plugins')
-        os.environ['QT_PLUGIN_PATH'] = qt_plugin_path
+def _print_paths():
+    from milkchan import paths
 
-        qpa_plugin_path = os.path.join(qt_plugin_path, 'platforms')
-        os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = qpa_plugin_path
-    except Exception:
-        pass
+    print(f"data={paths.get_user_data_dir()}")
+    print(f"config={paths.get_config_path()}")
+    print(f"assets={paths.get_assets_dir()}")
+    from milkchan.desktop.services.brain import framework
 
-    # If OpenCV set a conflicting QPA plugin path, remove it
-    qpa_path = os.environ.get('QT_QPA_PLATFORM_PLUGIN_PATH', '')
-    if 'cv2' in qpa_path or 'opencv' in qpa_path:
-        del os.environ['QT_QPA_PLATFORM_PLUGIN_PATH']
+    print(f"brain={framework.client.default_home()}")
 
-# Ensure project root is in path
-ROOT_DIR = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT_DIR))
+
+def _migrate_legacy_data():
+    from milkchan import paths
+
+    migrated = paths.migrate_legacy_user_data()
+    print(f"{'Migrated' if migrated else 'No'} legacy data from {paths.LEGACY_USER_DATA_DIR}")
+    print(f"Canonical data: {paths.get_user_data_dir()}")
+    print(f"Canonical config: {paths.get_config_path()}")
+
+
+def _self_test_runtime():
+    """Smoke test for packaged builds: the bundled character loads and the brain starts the way the app
+    starts it (packaged: MilkChan --serve-brain), in a throwaway home."""
+    import json
+    import signal
+    import tempfile
+    from pathlib import Path
+
+    from milkchan.desktop.services.brain import brain_command, framework
+    from milkchan.desktop.sprites.library import BUILT_IN, load_character
+
+    character = load_character(BUILT_IN)
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as home:
+        os.environ['SENTIENTMILK_HOME'] = home  # the started brain inherits it: the user's brain is not touched
+        client = framework.connect(Path(home), command=brain_command())
+        try:
+            api = client.health()['api']
+        finally:
+            os.kill(json.loads((Path(home) / 'server.json').read_text(encoding='utf-8'))['pid'], signal.SIGTERM)
+    print(f"runtime ok: character={character.name} frame={character.validate()} brain_api={api}")
+
+
+def _self_test_restart():
+    import subprocess
+
+    from milkchan.process import restart_command, restart_environment
+
+    result = subprocess.run(restart_command() + ["--self-test-runtime"], env=restart_environment(),
+                            check=False, text=True)
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+    print("restart ok")
+
+
+def _self_test_audio():
+    from milkchan.desktop.utils.audio_player import NarrationPlayer
+    from milkchan.paths import get_assets_dir
+
+    audio_path = get_assets_dir() / "narr.mp3"
+    player = NarrationPlayer(str(audio_path))
+    print(f"audio={audio_path}")
+    print(f"exists={audio_path.exists()}")
+    print(f"backend={player.backend_name()}")
+    print(f"available={player.is_available()}")
+    if "--play" in sys.argv[2:]:
+        print(f"played={player.play_test(1.0)}")
+
+
+def _install_user():
+    if sys.platform.startswith("linux"):
+        from milkchan.system_deps import ensure_runtime_system_dependencies
+
+        if not ensure_runtime_system_dependencies():
+            raise SystemExit(1)
+    from milkchan.self_install import install_current_binary
+
+    print(f"MilkChan installed to {install_current_binary()}")
+
+
+def _uninstall_user():
+    from milkchan.self_install import uninstall_current_binary
+
+    uninstall_current_binary()
+    print("MilkChan user installation removed")
+
+
+def _serve_brain():
+    from milkchan.desktop.services.brain import serve_brain
+
+    serve_brain()
+
+
+def _terminal_chat():
+    from milkchan.terminal_chat import main as terminal_main
+
+    terminal_main()
+
+
+COMMANDS = {
+    "--serve-brain": _serve_brain,
+    "--terminal-chat": _terminal_chat,
+    "--install-user": _install_user,
+    "--uninstall-user": _uninstall_user,
+    "--print-paths": _print_paths,
+    "--migrate-legacy-data": _migrate_legacy_data,
+    "--self-test-runtime": _self_test_runtime,
+    "--self-test-restart": _self_test_restart,
+    "--self-test-audio": _self_test_audio,
+}
 
 
 def main():
-    """Run the desktop GUI application"""
-    import logging
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [MilkChan] %(message)s"
-    )
-    logger = logging.getLogger(__name__)
-    
-    if len(sys.argv) >= 2 and sys.argv[1] == "--terminal-chat":
-        from milkchan.terminal_chat import main as terminal_main
-        sys.argv = [sys.argv[0], *sys.argv[2:]]
-        terminal_main()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [MilkChan] %(name)s: %(message)s")
+    configure_qt_environment()  # before anything starts Qt
+    if len(sys.argv) >= 2 and sys.argv[1] in COMMANDS:
+        COMMANDS[sys.argv[1]]()
         return
-
-    if len(sys.argv) >= 2 and sys.argv[1] == "--install-user":
-        if sys.platform.startswith("linux"):
-            from milkchan.system_deps import ensure_runtime_system_dependencies
-            if not ensure_runtime_system_dependencies():
-                raise SystemExit(1)
-        from milkchan.self_install import install_current_binary
-        target = install_current_binary()
-        print(f"MilkChan installed to {target}")
-        return
-
-    if len(sys.argv) >= 2 and sys.argv[1] == "--uninstall-user":
-        from milkchan.self_install import uninstall_current_binary
-        uninstall_current_binary()
-        print("MilkChan user installation removed")
-        return
-
-    if len(sys.argv) >= 2 and sys.argv[1] == "--print-paths":
-        from milkchan.bootstrap import get_user_data_dir, get_config_path, get_assets_dir, get_db_path, get_cache_file, get_ffmpeg_path
-        print(f"data={get_user_data_dir()}")
-        print(f"config={get_config_path()}")
-        print(f"assets={get_assets_dir()}")
-        print(f"database={get_db_path()}")
-        print(f"sprite_cache={get_cache_file()}")
-        print(f"ffmpeg={get_ffmpeg_path()}")
-        return
-
-    if len(sys.argv) >= 2 and sys.argv[1] == "--migrate-legacy-data":
-        from milkchan.bootstrap import LEGACY_USER_DATA_DIR, get_user_data_dir, get_config_path, migrate_legacy_user_data
-        migrated = migrate_legacy_user_data()
-        if migrated:
-            print(f"Migrated legacy data from {LEGACY_USER_DATA_DIR}")
-        else:
-            print(f"No legacy data migrated from {LEGACY_USER_DATA_DIR}")
-        print(f"Canonical data: {get_user_data_dir()}")
-        print(f"Canonical config: {get_config_path()}")
-        return
-
-    if len(sys.argv) >= 2 and sys.argv[1] == "--self-test-runtime":
-        import numpy
-        import scipy
-        from scipy.io import wavfile
-        print(f"runtime ok: numpy={numpy.__version__} scipy={scipy.__version__}")
-        return
-
-    if len(sys.argv) >= 2 and sys.argv[1] == "--self-test-restart":
-        import subprocess
-        from milkchan.process import restart_command, restart_environment
-        cmd = restart_command() + ["--self-test-runtime"]
-        result = subprocess.run(cmd, env=restart_environment(), check=False, text=True)
-        if result.returncode != 0:
-            raise SystemExit(result.returncode)
-        print("restart ok")
-        return
-
-    if len(sys.argv) >= 2 and sys.argv[1] == "--self-test-audio":
-        from milkchan.bootstrap import get_assets_dir
-        from milkchan.desktop.utils.audio_player import NarrationPlayer
-        audio_path = get_assets_dir() / "narr.mp3"
-        player = NarrationPlayer(str(audio_path))
-        print(f"audio={audio_path}")
-        print(f"exists={audio_path.exists()}")
-        print(f"backend={player.backend_name()}")
-        print(f"available={player.is_available()}")
-        if "--play" in sys.argv[2:]:
-            print(f"played={player.play_test(1.0)}")
-        return
-
-    logger.info("MilkChan v1.0 starting...")
-    
-    # Run desktop GUI directly - no API server!
     from milkchan.desktop.app import main as desktop_main
+
     desktop_main()
 
 

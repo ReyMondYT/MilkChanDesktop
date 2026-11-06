@@ -1,8 +1,8 @@
 """Process helpers for frozen and source execution."""
 
 import os
-import sys
 import subprocess
+import sys
 from typing import List
 
 

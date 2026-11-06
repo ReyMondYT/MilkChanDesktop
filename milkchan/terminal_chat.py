@@ -1,63 +1,40 @@
-"""
-MilkChan Terminal Chat - Rich Console Interface
+"""MilkChan terminal chat: a Rich console client for the running app.
 
-A standalone terminal chat interface using Rich for formatting.
-Launched from the overlay chatbox expand button.
-Communicates with main MilkChan app via IPC socket.
+Opened from the chat box's expand button, which passes the IPC token in
+``MILKCHAN_IPC_TOKEN``. The brain keeps the history: this client reads it
+through the app at start and shows new messages as they arrive.
 """
 
-import sys
 import json
 import os
+import signal
 import socket
+import sys
+import threading
 import time
-import concurrent.futures
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, Optional
 
-# Add project root to path for imports when running standalone
-# This file is at milkchan/terminal_chat.py, so go up 1 level to project root
+# Run as a script from a source checkout: make the package importable.
 _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
-_package_root = Path(__file__).resolve().parent
-if str(_package_root) not in sys.path:
-    sys.path.insert(0, str(_package_root))
+
+from rich.box import ROUNDED  # noqa: E402
+from rich.console import Console  # noqa: E402
+from rich.live import Live  # noqa: E402
+from rich.markdown import Markdown  # noqa: E402
+from rich.panel import Panel  # noqa: E402
+from rich.prompt import Prompt  # noqa: E402
+from rich.style import Style  # noqa: E402
 
 IPC_PORT = 19527
-
-try:
-    from rich.console import Console
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-    from rich.prompt import Prompt
-    from rich.text import Text
-    from rich.live import Live
-    from rich.layout import Layout
-    from rich.box import ROUNDED, MINIMAL
-    from rich.style import Style
-    from rich import print as rprint
-except ImportError:
-    print("Installing rich...")
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "rich", "-q"])
-    from rich.console import Console
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-    from rich.prompt import Prompt
-    from rich.text import Text
-    from rich.live import Live
-    from rich.layout import Layout
-    from rich.box import ROUNDED, MINIMAL
-    from rich.style import Style
-    from rich import print as rprint
+TOKEN = os.environ.get('MILKCHAN_IPC_TOKEN', '')
 
 console = Console(force_terminal=True, soft_wrap=True)
-
 ACCENT = "#ac3232"
-ACCENT_DIM = "#8a2828"
-
+assistant_name = "Milk Chan"
 
 _prompt_label_active = False
 _prompt_waiting_for_input = False
@@ -85,29 +62,24 @@ def _suspend_inline_prompt_label() -> bool:
 
 
 def _restore_inline_prompt_label(previously_active: bool):
-    """Re-render the prompt label if it was active before we suspended it."""
     if previously_active:
         _render_inline_prompt_label()
         console.file.flush()
 
 
-def _flag_prompt_label_active():
-    """Mark that Prompt.ask has drawn its label so guards can restore it."""
+def _ask(label: str) -> str:
+    """Prompt.ask that lets background output keep the label visible."""
     global _prompt_label_active, _prompt_waiting_for_input
-    _prompt_waiting_for_input = True
-    _prompt_label_active = True
-
-
-def _mark_prompt_consumed():
-    """Reset prompt label state once Prompt.ask has collected input."""
-    global _prompt_label_active, _prompt_waiting_for_input
-    _prompt_label_active = False
-    _prompt_waiting_for_input = False
+    _prompt_waiting_for_input = _prompt_label_active = True
+    try:
+        return Prompt.ask(label)
+    finally:
+        _prompt_waiting_for_input = _prompt_label_active = False
 
 
 @contextmanager
 def _prompt_guard():
-    """Suspend inline prompt label while emitting console output."""
+    """Suspend the inline prompt label while emitting console output."""
     was_active = _suspend_inline_prompt_label()
     try:
         yield
@@ -115,298 +87,78 @@ def _prompt_guard():
         _restore_inline_prompt_label(was_active)
 
 
+def _style(title: str, icon: str, color: str) -> Dict[str, Any]:
+    return {'title': title, 'icon': icon, 'border_style': Style(color=color)}
+
+
 class InfoBlock:
-    """Beautiful info block for displaying errors, tool calls, and system messages."""
-    
+    """Panels for errors, tool calls and system messages."""
+
     STYLES = {
-        'error': {
-            'title': 'Error',
-            'icon': '✕',
-            'border_style': Style(color='#ff6b6b'),
-            'title_style': Style(color='#ff6b6b', bold=True),
-            'bg_color': '#3a1515',
-        },
-        'warning': {
-            'title': 'Warning',
-            'icon': '⚠',
-            'border_style': Style(color='#ffb86c'),
-            'title_style': Style(color='#ffb86c', bold=True),
-            'bg_color': '#3a2a15',
-        },
-        'tool': {
-            'title': 'Tool',
-            'icon': '⚙',
-            'border_style': Style(color='#8be9fd'),
-            'title_style': Style(color='#8be9fd', bold=True),
-            'bg_color': '#152030',
-        },
-        'info': {
-            'title': 'Info',
-            'icon': 'ℹ',
-            'border_style': Style(color='#50fa7b'),
-            'title_style': Style(color='#50fa7b', bold=True),
-            'bg_color': '#153020',
-        },
-'rate_limit': {
-        'title': 'Rate Limited',
-        'icon': '⏳',
-        'border_style': Style(color='#ffb86c'),
-        'title_style': Style(color='#ffb86c', bold=True),
-        'bg_color': '#3a2a15',
-    },
-    'completed': {
-        'title': 'Tool',
-        'icon': '✓',
-        'border_style': Style(color='#50fa7b'),
-        'title_style': Style(color='#50fa7b', bold=True),
-        'bg_color': '#153020',
-    },
-    'network': {
-            'title': 'Connection Error',
-            'icon': '📡',
-            'border_style': Style(color='#ff79c6'),
-            'title_style': Style(color='#ff79c6', bold=True),
-            'bg_color': '#301530',
-        },
-        'timeout': {
-            'title': 'Timeout',
-            'icon': '⏱',
-            'border_style': Style(color='#f1fa8c'),
-            'title_style': Style(color='#f1fa8c', bold=True),
-            'bg_color': '#303015',
-        },
+        'error': _style('Error', '✕', '#ff6b6b'),
+        'warning': _style('Warning', '⚠', '#ffb86c'),
+        'tool': _style('Tool', '⚙', '#8be9fd'),
+        'info': _style('Info', 'ℹ', '#50fa7b'),
+        'rate_limit': _style('Rate Limited', '⏳', '#ffb86c'),
+        'completed': _style('Tool', '✓', '#50fa7b'),
+        'network': _style('Connection Error', '📡', '#ff79c6'),
+        'timeout': _style('Timeout', '⏱', '#f1fa8c'),
     }
-    
+
     @classmethod
     def render(cls, block_type: str, message: str, details: Optional[str] = None) -> Panel:
         style = cls.STYLES.get(block_type, cls.STYLES['info'])
-        
-        content_parts = [message]
-        if details:
-            content_parts.append(f"[dim]{details}[/dim]")
-        
-        content = '\n'.join(content_parts)
-        
-        # Use a simple title without markup
-        title = f"{style['icon']} {style['title']}"
-        
-        return Panel(
-            content,
-            title=title,
-            border_style=style['border_style'],
-            box=ROUNDED,
-            padding=(0, 1),
-            expand=False,
-        )
-    
+        content = message + (f"\n[dim]{details}[/dim]" if details else '')
+        return Panel(content, title=f"{style['icon']} {style['title']}", border_style=style['border_style'],
+                     box=ROUNDED, padding=(0, 1), expand=False)
+
     @classmethod
     def render_error(cls, error: Dict[str, Any]) -> Panel:
-        error_type = error.get('type', 'error') if isinstance(error, dict) else 'error'
-        message = error.get('message', 'An error occurred') if isinstance(error, dict) else str(error)
-        details = error.get('details') if isinstance(error, dict) else None
-        
-        block_type = error_type if error_type in cls.STYLES else 'error'
-        return cls.render(block_type, message, details)
+        error_type = error.get('type', 'error')
+        return cls.render(error_type if error_type in cls.STYLES else 'error',
+                          error.get('message', 'An error occurred'), error.get('details'))
 
 
-class ChatEntry:
-    """Represents a single entry in the chat history (message or info block)."""
-    
-    def __init__(self, entry_type: str, content: Any, metadata: Optional[Dict] = None):
-        self.entry_type = entry_type
-        self.content = content
-        self.metadata = metadata or {}
-        self.timestamp = time.strftime("%H:%M:%S")
-    
-    def render(self):
-        if self.entry_type == 'user':
-            return f"[bold cyan]You:[/bold cyan] {self.content}"
-        elif self.entry_type == 'assistant':
-            return None
-        elif self.entry_type == 'error':
-            return InfoBlock.render_error(self.content)
-        elif self.entry_type == 'tool':
-            tool_name = self.metadata.get('tool_name', 'unknown')
-            return InfoBlock.render('tool', f"Called [bold]{tool_name}[/bold]", self.content)
-        elif self.entry_type == 'info':
-            return InfoBlock.render('info', self.content, self.metadata.get('details'))
-        return None
-
-
-def send_to_milkchan(command: str, params: dict = None) -> dict:
-    """Send command to MilkChan IPC server"""
-    if params is None:
-        params = {}
-
+def send_to_milkchan(command: str, params: Optional[dict] = None, timeout: Optional[float] = 30.0) -> dict:
+    """Send one command to the app; failures come back as {'error': ...}."""
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(120.0)
-        sock.connect(('127.0.0.1', IPC_PORT))
-
-        message = json.dumps({'command': command, 'params': params})
-        sock.sendall((message + '\n').encode('utf-8'))
-
-        response = b''
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            response += chunk
-            if b'\n' in response:
-                break
-
-        sock.close()
+        with socket.create_connection(('127.0.0.1', IPC_PORT), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            message = {'command': command, 'params': params or {}, 'token': TOKEN}
+            sock.sendall((json.dumps(message) + '\n').encode('utf-8'))
+            response = b''
+            while b'\n' not in response:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                response += chunk
         return json.loads(response.decode('utf-8').strip())
-    except Exception as e:
-        return {'error': str(e)}
+    except (OSError, ValueError) as exc:
+        return {'error': str(exc)}
 
 
-def load_history(history_file: str) -> list:
-    # First try to load from MilkChan database via IPC
-    result = send_to_milkchan('get_history')
-    if result.get('status') == 'ok' and result.get('history'):
-        history = result['history']
-        if history:
-            print(f"[TUI] Loaded {len(history)} messages from database")
-            return history
-    
-    # Fallback to history file
-    if os.path.exists(history_file):
-        with open(history_file, 'r', encoding='utf-8') as f:
-            history = json.load(f)
-            if history:
-                print(f"[TUI] Loaded {len(history)} messages from file")
-            return history
-    print("[TUI] No history found, starting fresh")
-    return []
-
-
-def save_history(history_file: str, history: list):
-    # Save to history file
-    with open(history_file, 'w', encoding='utf-8') as f:
-        json.dump(history, f, indent=2)
-    # Also sync to MilkChan database
-    send_to_milkchan('update_history', {'history': history})
-
-
-def display_history(history: list, *, use_guard: bool = True):
-    context = _prompt_guard() if use_guard else nullcontext()
-    with context:
-        console.clear()
-        console.print(Panel("[bold red]Milk Chan Terminal Chat[/bold red]", style=ACCENT, box=ROUNDED))
-        console.print("[dim](Connected to MilkChan - sprites and audio will respond)[/dim]")
-        console.print()
-
-        for msg in history:
-            role = msg.get('role', '')
-            content = msg.get('content', '')
-            entry_type = msg.get('entry_type', '')
-
-            if entry_type == 'error':
-                console.print(InfoBlock.render_error(content))
-                console.print()
-            elif entry_type == 'tool':
-                tool_name = msg.get('tool_name', 'unknown')
-                console.print(InfoBlock.render('tool', f"Called [bold]{tool_name}[/bold]", content))
-                console.print()
-            elif entry_type == 'info':
-                console.print(InfoBlock.render('info', content, msg.get('details')))
-                console.print()
-            elif role == 'user':
-                console.print(f"[bold cyan]You:[/bold cyan] {content}")
-            elif role == 'assistant':
-                console.print()
-                console.print("[bold magenta]Milk Chan:[/bold magenta]")
-                md = Markdown(content)
-                console.print(md)
-                console.print()
-
-
-def stream_response(response: str, emotion: dict, char_delay: float = 0.03):
-    """Stream response character by character with smooth markdown rendering"""
-
-    if emotion:
-        send_to_milkchan('stream_start', {'emotion': emotion})
-
-    send_to_milkchan('start_speech')
-
-    displayed = ""
-
-    md = Markdown(displayed)
-
-    with Live(md, refresh_per_second=30, transient=False) as live:
-        for char in response:
-            displayed += char
-            md = Markdown(displayed)
-            live.update(md)
-            time.sleep(char_delay)
-
-    console.print("\n[bold magenta]Milk Chan:[/bold magenta]")
-    console.print(Markdown(displayed))
-
-    send_to_milkchan('stream_end')
+def display_history(history: list):
+    console.clear()
+    console.print(Panel(f"[bold red]{assistant_name} Terminal Chat[/bold red]", style=ACCENT, box=ROUNDED))
+    console.print("[dim](Connected to MilkChan - sprites and audio will respond)[/dim]")
+    console.print()
+    for msg in history:
+        if msg.get('role') == 'user':
+            console.print(f"[bold cyan]You:[/bold cyan] {msg.get('content', '')}")
+        elif msg.get('role') == 'assistant':
+            console.print()
+            console.print(f"[bold magenta]{assistant_name}:[/bold magenta]")
+            console.print(Markdown(msg.get('content', '')))
+            console.print()
+    console.print("[dim]Type your message and press Enter. Type 'exit' or 'quit' to close.[/dim]")
+    console.print()
 
 
 def display_error_block(error: dict):
-    """Display a beautiful error block."""
     with _prompt_guard():
         console.print()
         console.print(InfoBlock.render_error(error))
         console.print()
-
-
-def display_thinking_spinner(duration: float = 0.5):
-    """Display a simple thinking indicator with dots animation."""
-    spinner = ["   ", ".  ", ".. ", "..."]
-    start_time = time.time()
-    
-    # Clear current line
-    console.file.write('\r')
-    
-    while time.time() - start_time < duration:
-        for frame in spinner:
-            console.file.write(f'\r[dim]Thinking{frame}[/dim]')
-            console.file.flush()
-            time.sleep(0.15)
-    
-    # Clear the line
-    console.file.write('\r\x1b[2K')
-    console.file.flush()
-
-
-def format_tool_result(result: Any) -> str:
-    """Format tool result for display."""
-    if result is None:
-        return ""
-    
-    if isinstance(result, dict):
-        if {"returncode", "stdout", "stderr"}.issubset(result.keys()):
-            parts = [f"returncode: {result.get('returncode')}"]
-            stdout = (result.get('stdout') or '').strip()
-            stderr = (result.get('stderr') or '').strip()
-            if stdout:
-                parts.append(f"stdout:\n{_truncate_tool_text(stdout)}")
-            if stderr:
-                parts.append(f"stderr:\n{_truncate_tool_text(stderr)}")
-            return "\n".join(parts)
-
-        # For web_search results, show count of results
-        if 'results' in result:
-            count = len(result['results'])
-            return f"Found {count} results"
-        elif 'web' in result:
-            count = len(result.get('web', {}).get('results', []))
-            return f"Found {count} web results"
-        else:
-            # Show first key or summary
-            keys = list(result.keys())[:3]
-            return f"Data: {', '.join(keys)}..." if len(result) > 3 else f"Data: {', '.join(keys)}"
-    elif isinstance(result, list):
-        return f"[{len(result)} items]"
-    elif isinstance(result, str):
-        return _truncate_tool_text(result)
-    else:
-        return _truncate_tool_text(str(result))
 
 
 def _truncate_tool_text(text: str, limit: int = 2000) -> str:
@@ -415,476 +167,209 @@ def _truncate_tool_text(text: str, limit: int = 2000) -> str:
     return text[:limit] + f"\n... [truncated {len(text) - limit} chars]"
 
 
-def display_tools(tools: List[Dict]):
-    """Display tool blocks with nice formatting."""
-    if not tools:
-        return
-    with _prompt_guard():    
-        for tool in tools:
-            tool_name = tool.get('tool_name', 'unknown')
-            status = tool.get('status', 'completed')
-            
-            # Skip internal tools
-            if tool_name in ('update_sprite', 'reset_sprite_state'):
-                continue
-                
-            # Format status with icon
-            status_icons = {
-                'running': '⏳',
-                'completed': '✓',
-                'error': '✗'
-            }
-            status_icon = status_icons.get(status, '•')
-            
-            # Build details
-            details_parts = []
-            
-            # Show arguments if available
-            args = tool.get('arguments', {})
-            if args and tool_name == 'web_search':
-                query = args.get('query', '')
-                if query:
-                    details_parts.append(f"Query: [cyan]{query}[/cyan]")
-            
-            # Show formatted result
-            result = tool.get('result')
-            if result:
-                formatted = format_tool_result(result)
-                if formatted:
-                    details_parts.append(formatted)
-            
-            # Show error if any
-            error = tool.get('error')
-            if error:
-                details_parts.append(f"[red]Error: {error}[/red]")
-            
-            details = "\n".join(details_parts) if details_parts else f"Status: {status_icon} {status}"
-            
-            console.print(InfoBlock.render('tool', f"[bold]{tool_name}[/bold]", details))
-            console.print()
+def format_tool_result(result: Any) -> str:
+    if result is None:
+        return ""
+    if isinstance(result, dict):
+        if {"returncode", "stdout", "stderr"}.issubset(result):
+            parts = [f"returncode: {result.get('returncode')}"]
+            stdout = (result.get('stdout') or '').strip()
+            stderr = (result.get('stderr') or '').strip()
+            if stdout:
+                parts.append(f"stdout:\n{_truncate_tool_text(stdout)}")
+            if stderr:
+                parts.append(f"stderr:\n{_truncate_tool_text(stderr)}")
+            return "\n".join(parts)
+        if 'results' in result:
+            return f"Found {len(result['results'])} results"
+        if 'web' in result:
+            return f"Found {len(result.get('web', {}).get('results', []))} web results"
+        keys = list(result.keys())[:3]
+        return f"Data: {', '.join(keys)}..." if len(result) > 3 else f"Data: {', '.join(keys)}"
+    if isinstance(result, list):
+        return f"[{len(result)} items]"
+    return _truncate_tool_text(str(result))
+
+
+def _arguments(data: Dict[str, Any]) -> dict:
+    arguments = data.get('arguments')
+    return arguments if isinstance(arguments, dict) else {}  # unparsable arguments arrive as text
+
+
+def _tool_key(data: Dict[str, Any]) -> str:
+    return f"{data.get('tool_name', 'unknown')}:{sorted(_arguments(data).items())}"
 
 
 _active_tool_blocks: Dict[str, int] = {}
 
 
 def display_tool_event(event: Dict[str, Any]):
-    """Display a single tool event in real-time with overwrite support."""
-    global _active_tool_blocks
-
+    """Show a tool call; its completion replaces the "running" block."""
     event_type = event.get('type', 'tool_end')
     data = event.get('data', {})
-
     tool_name = data.get('tool_name', 'unknown')
-
-    # Skip internal tools
-    if tool_name in ('update_sprite', 'reset_sprite_state'):
-        return
-
-    # Create unique identifier for this tool call
-    args_str = str(sorted(data.get('arguments', {}).items()))
-    tool_hash = f"{tool_name}:{args_str}"
-
-    # Determine status and style
+    key = _tool_key(data)
     if event_type == 'tool_start':
-        status_icon = '⏳'
-        status_text = 'running'
-        block_type = 'tool'
+        status, block_type = '⏳ running', 'tool'
     elif event_type == 'tool_error':
-        status_icon = '✗'
-        status_text = 'error'
-        block_type = 'error'
+        status, block_type = '✗ error', 'error'
     else:
-        status_icon = '✓'
-        status_text = 'completed'
-        block_type = 'completed'
-
-    # Build details
-    details_parts = [f"Status: {status_icon} {status_text}"]
-
-    # Show arguments
-    args = data.get('arguments', {})
-    if args and tool_name == 'web_search':
-        query = args.get('query', '')
-        if query:
-            details_parts.append(f"Query: [cyan]{query}[/cyan]")
-
-    # Show result
-    result = data.get('result')
-    if result:
-        formatted = format_tool_result(result)
-        if formatted:
-            details_parts.append(formatted)
-
-    # Show error
-    error = data.get('error')
-    if error:
-        details_parts.append(f"[red]Error: {error}[/red]")
-
+        status, block_type = '✓ completed', 'completed'
+    details_parts = [f"Status: {status}"]
+    query = _arguments(data).get('query') if tool_name == 'web_search' else None
+    if query:
+        details_parts.append(f"Query: [cyan]{query}[/cyan]")
+    formatted = format_tool_result(data.get('result'))
+    if formatted:
+        details_parts.append(formatted)
+    if data.get('error'):
+        details_parts.append(f"[red]Error: {data['error']}[/red]")
     details = "\n".join(details_parts)
 
-    # For tool_end, overwrite the running block if we tracked it
-    if event_type == 'tool_end' and tool_hash in _active_tool_blocks:
-        lines_to_clear = _active_tool_blocks[tool_hash]
-        # Move cursor up and clear lines
-        for _ in range(lines_to_clear):
-            sys.stdout.write('\x1b[1A')  # Cursor up
-            sys.stdout.write('\x1b[2K')  # Clear line
-        sys.stdout.write('\x1b[0J')  # Clear to end
-        sys.stdout.flush()
-        del _active_tool_blocks[tool_hash]
-
-    # Render the block
-    panel = InfoBlock.render(block_type, f"[bold]{tool_name}[/bold]", details)
-    console.print(panel)
-    console.print()
-
-    # Track lines for running tools (to overwrite later)
-    if event_type == 'tool_start':
-        # Estimate lines: panel height + 1 for blank line
-        # Panel height depends on content, estimate generously
-        estimated_lines = 6 + details.count('\n')
-        _active_tool_blocks[tool_hash] = estimated_lines
-    _render_inline_prompt_label()
+    with _prompt_guard():
+        if event_type != 'tool_start' and key in _active_tool_blocks:
+            for _ in range(_active_tool_blocks.pop(key)):
+                sys.stdout.write('\x1b[1A\x1b[2K')
+            sys.stdout.write('\x1b[0J')
+            sys.stdout.flush()
+        console.print(InfoBlock.render(block_type, f"[bold]{tool_name}[/bold]", details))
+        console.print()
+        if event_type == 'tool_start':
+            _active_tool_blocks[key] = 6 + details.count('\n')  # panel height plus the blank line
 
 
-def handle_sync_event(event: Dict[str, Any], history: list, history_file: str) -> bool:
-    """Handle sync events from chatbox. Returns True if handled."""
-    event_type = event.get('type', '')
+def display_assistant_response(response: str, animate_sprite: bool):
+    """Type out a reply; ``animate_sprite`` also moves the character's mouth."""
+    with _prompt_guard():
+        console.print(f"[bold magenta]{assistant_name}:[/bold magenta]")
+        if response.strip():
+            if animate_sprite:
+                send_to_milkchan('start_speech')
+            displayed = ""
+            with Live(console=console, refresh_per_second=30, transient=True) as live:
+                for word in response.split(' '):
+                    displayed = f"{displayed} {word}" if displayed else word
+                    live.update(Markdown(displayed))
+                    time.sleep(0.02)
+            console.print(Markdown(response))
+            if animate_sprite:
+                send_to_milkchan('stop_speech')
+        else:
+            console.print("[dim italic](No response)[/dim italic]")
+        console.print()
+
+
+def handle_stream_event(event: Dict[str, Any], shown_tools: set):
+    """Messages typed in the chat box, history clears and live tool calls."""
     data = event.get('data', {})
-
-    # Check if this is a chat_response sync event
-    if event_type == 'chat_response':
-        msg_type = data.get('type', '')
-        
-        if msg_type == 'sync_message':
-            role = data.get('role', 'user')
-            content = data.get('content', '')
-            emotion = data.get('emotion')
-            
-            # Add to history
-            history.append({'role': role, 'content': content})
-            save_history(history_file, history)
-            
-            # Display the message
-            if role == 'user':
+    if event.get('type') == 'chat_response':
+        if data.get('type') == 'sync_message':
+            if data.get('role') == 'user':
                 with _prompt_guard():
-                    console.print(f"[bold cyan]You:[/bold cyan] {content}")
+                    console.print(f"[bold cyan]You:[/bold cyan] {data.get('content', '')}")
                     console.print()
-            elif role == 'assistant':
-                display_assistant_response(content, emotion)
-            
-            return True
-        
-        elif msg_type == 'system' and data.get('action') == 'clear_history':
-            # History cleared from chatbox – rebuild UI so prompt is restored
-            history.clear()
-            save_history(history_file, history)
-
+            elif data.get('role') == 'assistant':
+                # The chat box already animates the character for its own replies.
+                display_assistant_response(data.get('content', ''), animate_sprite=False)
+        elif data.get('action') == 'clear_history':
             was_active = _suspend_inline_prompt_label()
             try:
-                # Re-render the empty history header for consistency
-                display_history(history, use_guard=False)
+                display_history([])
                 console.print("[yellow]History cleared from main app[/yellow]")
-                console.print()
-                console.print("[dim]Type your message and press Enter. Type 'exit' or 'quit' to close.[/dim]")
                 console.print()
             finally:
                 _restore_inline_prompt_label(was_active)
-            return True
-    
-    return False
+        return
+    if event.get('type') not in ('tool_start', 'tool_end', 'tool_error'):
+        return
+    marker = f"{_tool_key(data)}:{event['type']}"
+    if marker not in shown_tools:
+        shown_tools.add(marker)
+        display_tool_event(event)
 
 
-def display_assistant_response(response: str, emotion: dict):
-    """Display assistant response with typing animation and mouth sync."""
-    with _prompt_guard():
-        console.print("[bold magenta]Milk Chan:[/bold magenta]")
-        
-        if response and response.strip():
-            # Start speech animation via IPC
-            send_to_milkchan('start_speech')
-            
-            # Send emotion if available
-            if emotion:
-                send_to_milkchan('stream_start', {'emotion': emotion})
-            
-            # Use Rich Live for smooth markdown streaming
-            words = response.split(' ')
-            displayed = ""
-            
-            with Live(console=console, refresh_per_second=30, transient=True) as live:
-                for i, word in enumerate(words):
-                    if i == 0:
-                        displayed = word
-                    else:
-                        displayed = f"{displayed} {word}"
-                    
-                    # Update the live display with markdown rendering
-                    live.update(Markdown(displayed))
-                    time.sleep(0.02)
-            
-            # Final render (persistent)
-            console.print(Markdown(response))
-            
-            # End speech animation
-            send_to_milkchan('stream_end')
-        else:
-            console.print("[dim italic](No response)[/dim italic]")
-        
+def _watch_for_shutdown(stop: threading.Event):
+    """Close this terminal when MilkChan exits."""
+    terminal_pid = os.getppid()
+    while not stop.is_set():
+        if 'error' in send_to_milkchan('ping', timeout=5.0):
+            console.print("\n[red]MilkChan closed. Closing terminal...[/red]")
+            try:
+                if os.name == 'nt':
+                    os.system(f'taskkill /f /pid {terminal_pid}')
+                else:
+                    os.kill(terminal_pid, signal.SIGTERM)
+            except OSError:
+                pass
+            os._exit(0)
+        time.sleep(0.5)
+
+
+def chat_turn(user_input: str, shown_tools: set):
+    console.print("[dim]Thinking...[/dim]")
+    result = send_to_milkchan('chat', {'message': user_input}, timeout=None)
+    console.file.write('\x1b[1A\x1b[2K')  # remove "Thinking..."
+    console.file.flush()
+    if result.get('status') != 'ok':
+        error = result.get('error')
+        display_error_block(error if isinstance(error, dict) else {'type': 'error', 'message': str(error)})
+        return
+    for tool in result.get('tools', []):
+        # Tool events normally arrive live; show any the stream missed.
+        if f"{_tool_key(tool)}:tool_end" not in shown_tools:
+            display_tool_event({'type': 'tool_end', 'data': tool})
+    sprite = result.get('sprite')
+    if sprite:
+        send_to_milkchan('set_sprite', {'sprite': sprite})
+    display_assistant_response(result.get('response', ''), animate_sprite=True)
+    if sprite:
+        console.print(f"[dim]{sprite['pose']} / {sprite['mood']}[/dim]")
         console.print()
-        
-        if emotion:
-            console.print(f"[dim]Emotion: {emotion.get('emotion', [])}[/dim]")
-            console.print()
-
-
-def _import_stream_client_classes():
-    """
-    Import stream client classes without requiring full `milkchan` package imports.
-    In frozen TUI mode, importing `milkchan.desktop...` can execute `milkchan/__init__.py`,
-    which may reference modules not bundled for the external terminal script.
-    """
-    try:
-        from milkchan.desktop.services.stream_client import (
-            StreamClient,
-            StreamConfig,
-            ConnectionState,
-        )
-        return StreamClient, StreamConfig, ConnectionState
-    except ModuleNotFoundError:
-        from desktop.services.stream_client import (
-            StreamClient,
-            StreamConfig,
-            ConnectionState,
-        )
-        return StreamClient, StreamConfig, ConnectionState
 
 
 def main():
-    if len(sys.argv) < 2:
-        console.print("[red]Error: No history file provided[/red]")
+    global assistant_name
+    from milkchan.desktop.services.stream_client import StreamClient, StreamConfig
+
+    if not TOKEN:
+        console.print("[red]Open the terminal chat from MilkChan's chat box.[/red]")
         sys.exit(1)
-
-    history_file = sys.argv[1]
-    history = load_history(history_file)
-
-    result = send_to_milkchan('ping')
-    if 'error' in result:
-        console.print(f"[red]Cannot connect to MilkChan: {result['error']}[/red]")
+    started = send_to_milkchan('tui_start')
+    if started.get('status') != 'ok':
+        console.print(f"[red]Cannot connect to MilkChan: {started.get('error')}[/red]")
         console.print("[yellow]Make sure MilkChan is running.[/yellow]")
         sys.exit(1)
+    assistant_name = started.get('name') or assistant_name
+    history = send_to_milkchan('get_history').get('history', [])
 
-    # Get stream port and connect
-    tui_result = send_to_milkchan('tui_start')
-    stream_port = tui_result.get('stream_port', 19528)
-    
-    # Import stream client
-    StreamClient, StreamConfig, ConnectionState = _import_stream_client_classes()
-    
-# Track displayed tools to avoid duplicates
-    displayed_tools = set()
-
-    def on_stream_event(event: Dict[str, Any]):
-        """Handle stream events with deduplication."""
-        # Check for sync events first (from chatbox)
-        if handle_sync_event(event, history, history_file):
-            return
-
-        event_type = event.get('type', '')
-        data = event.get('data', {})
-        tool_name = data.get('tool_name', 'unknown')
-
-        # Skip internal tools
-        if tool_name in ('update_sprite', 'reset_sprite_state'):
-            return
-
-        # Create unique identifier for this tool call (name + args only)
-        # Don't include event_type so start+end are tracked together
-        args_str = str(sorted(data.get('arguments', {}).items()))
-        tool_hash = f"{tool_name}:{args_str}"
-
-        # For tool_end events, check if we already showed this tool completing
-        if event_type == 'tool_end':
-            completion_hash = f"{tool_hash}:completed"
-            if completion_hash in displayed_tools:
-                return  # Already showed completion
-            displayed_tools.add(completion_hash)
-
-        # For tool_start, just mark that we showed it starting
-        if event_type == 'tool_start':
-            displayed_tools.add(f"{tool_hash}:started")
-
-        display_tool_event(event)
-    
-    # Create stream client for real-time tool events
-    stream_config = StreamConfig(port=stream_port)
-    stream_client = StreamClient(
-        config=stream_config,
-        on_event=on_stream_event
-    )
-    
-    # Connect to stream
-    stream_connected = stream_client.connect(filters=['tool_start', 'tool_end', 'tool_error', 'chat_response'])
-    if stream_connected:
-        console.print("[dim]Connected to event stream[/dim]")
-    
-    # Display initial history
+    shown_tools: set = set()
+    stream_client = StreamClient(StreamConfig(port=started['stream_port']), token=TOKEN,
+                                 on_event=lambda event: handle_stream_event(event, shown_tools))
+    stream_client.connect(filters=['tool_start', 'tool_end', 'tool_error', 'chat_response'])
     display_history(history)
-    console.print("[dim]Type your message and press Enter. Type 'exit' or 'quit' to close.[/dim]")
-    console.print()
 
-    import threading
-    import signal
-    shutdown_event = threading.Event()
-
-    terminal_pid = os.getppid()
-
-    def watch_for_shutdown():
-        import time
-        while not shutdown_event.is_set():
-            result = send_to_milkchan('ping')
-            if 'error' in result:
-                shutdown_event.set()
-                console.print("\n[red]MilkChan closed. Closing terminal...[/red]")
-                stream_client.disconnect()
-                try:
-                    if os.name == 'nt':
-                        os.system(f'taskkill /f /pid {terminal_pid}')
-                    else:
-                        os.kill(terminal_pid, signal.SIGTERM)
-                except Exception:
-                    pass
-                os._exit(0)
-            time.sleep(0.5)
-
-    watcher_thread = threading.Thread(target=watch_for_shutdown, daemon=True)
-    watcher_thread.start()
-
-    while True:
-        try:
-            _flag_prompt_label_active()
-            user_input = Prompt.ask("[bold cyan]You[/bold cyan]")
-            _mark_prompt_consumed()
-
-            if shutdown_event.is_set():
-                break
-
+    stop = threading.Event()
+    threading.Thread(target=_watch_for_shutdown, args=(stop,), daemon=True).start()
+    try:
+        while True:
+            user_input = _ask("[bold cyan]You[/bold cyan]")
             if user_input.lower() in ('exit', 'quit', 'q'):
                 console.print("\n[bold red]Closing terminal chat...[/bold red]")
-                save_history(history_file, history)
                 break
-
-            if not user_input.strip():
-                continue
-
-            # Add user message to history
-            history.append({'role': 'user', 'content': user_input})
-            
-            # Clear displayed tools for this turn
-            displayed_tools.clear()
-            
-            # Show thinking indicator
-            console.print("[dim]Thinking...[/dim]")
-            
-            # Send chat request
-            api_messages = [{'role': m['role'], 'content': m['content']} for m in history if m.get('role') in ('user', 'assistant')]
-            
-            # Make the chat request in a separate thread
-            import concurrent.futures
-            
-            result = None
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(send_to_milkchan, 'chat', {
-                    'message': user_input,
-                    'history': api_messages[:-1]
-                })
-                
-                # Wait for response (tools will be displayed in real-time via stream)
-                while not future.done():
-                    if shutdown_event.is_set():
-                        break
-                    time.sleep(0.05)
-                
-                try:
-                    result = future.result(timeout=120)
-                except concurrent.futures.TimeoutError:
-                    result = {'status': 'error', 'error': {'type': 'timeout', 'message': 'Request timed out'}}
-            
-            # Clear the "Thinking..." line
-            console.file.write('\x1b[1A\x1b[2K')
-            console.file.flush()
-
-            if shutdown_event.is_set():
-                break
-
-            if result.get('status') == 'error' or 'error' in result:
-                error = result.get('error', {'type': 'unknown', 'message': result.get('error', 'Unknown error')})
-                display_error_block(error)
-                history.pop()
-                history.append({
-                    'entry_type': 'error',
-                    'content': error,
-                    'role': 'system'
-                })
-                continue
-
-            response = result.get('response', '')
-            emotion = result.get('emotion')
-            tools = result.get('tools', [])
-
-            # Display any tools that weren't shown via stream
-            for tool in tools:
-                tool_name = tool.get('tool_name', 'unknown')
-                if tool_name in ('update_sprite',):
-                    continue
-                # Create unique identifier for this tool call (name + arguments)
-                args_str = str(sorted(tool.get('arguments', {}).items()))
-                tool_hash = f"{tool_name}:{args_str}"
-                completion_hash = f"{tool_hash}:completed"
-                if completion_hash not in displayed_tools:
-                    display_tool_event({'type': 'tool_end', 'data': tool})
-                    displayed_tools.add(completion_hash)
-            
-            # Display assistant response with typing animation
-            display_assistant_response(response, emotion)
-
-            # Add assistant response to history
-            history.append({'role': 'assistant', 'content': response})
-            
-            # Save tools to history for persistence
-            if tools:
-                for tool in tools:
-                    if tool.get('tool_name') not in ('update_sprite',):
-                        history.append({
-                            'entry_type': 'tool',
-                            'tool_name': tool.get('tool_name', 'unknown'),
-                            'content': tool.get('result', ''),
-                            'status': tool.get('status', 'completed'),
-                            'role': 'system'
-                        })
-
-        except KeyboardInterrupt:
-            console.print("\n[bold red]Interrupted. Saving history...[/bold red]")
-            save_history(history_file, history)
-            send_to_milkchan('stream_end')
-            stream_client.disconnect()
-            break
-        except EOFError:
-            save_history(history_file, history)
-            send_to_milkchan('stream_end')
-            stream_client.disconnect()
-            break
-
-    shutdown_event.set()
-    stream_client.disconnect()
-    send_to_milkchan('tui_end')
-    send_to_milkchan('stop_speech')
-    console.print("[green]History saved. You can close this terminal.[/green]")
+            if user_input.strip():
+                shown_tools.clear()
+                chat_turn(user_input, shown_tools)
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        stop.set()
+        stream_client.disconnect()
+        send_to_milkchan('tui_end')
+        send_to_milkchan('stop_speech')
+    console.print("[green]Your conversation is saved. You can close this terminal.[/green]")
     try:
-        _flag_prompt_label_active()
-        Prompt.ask("[dim]Press Enter to exit[/dim]")
-        _mark_prompt_consumed()
-    except Exception:
+        _ask("[dim]Press Enter to exit[/dim]")
+    except (KeyboardInterrupt, EOFError):
         pass
 
 

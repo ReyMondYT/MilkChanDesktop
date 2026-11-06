@@ -13,7 +13,6 @@ from typing import List, Optional
 from PyQt5.QtCore import QUrl
 from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
 
-
 _SYSTEM_BIN_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")
 
 

@@ -1,157 +1,204 @@
-# MilkChan Desktop 🥛
+# MilkChan Desktop Assistant
 
-MilkChan is an immersive desktop companion for Windows, macOS, and Linux. She floats on your desktop, studies your screen context (video or screenshots), talks using OpenAI models, mirrors her mood with hundreds of sprites, and lives entirely in a PyQt5 application—no web servers, no browsers, no mystery daemons.
+MilkChan is a PyQt5 desktop companion: the body of the SentientMilk brain.
+SentientMilk thinks, remembers, uses tools and decides what to say and show;
+MilkChan shows the character, gives the brain eyes (screenshots) and a voice
+(the chat box and terminal), and acts out the expression it picks. This
+repository owns the character on screen, the chat box, screen capture, its own
+settings, IPC with the terminal chat, and packaging.
 
-## Table of Contents
-1. [Key Highlights](#key-highlights)
-2. [Unified Architecture](#unified-architecture)
-3. [Asset & Bootstrap Pipeline](#asset--bootstrap-pipeline)
-4. [Getting Started (Developers)](#getting-started-developers)
-5. [Packaged Builds](#packaged-builds)
-6. [Configuration](#configuration)
-7. [Troubleshooting](#troubleshooting)
-8. [Folder Structure](#folder-structure)
-9. [Credits & License](#credits--license)
+## Repository layout
 
-## Key Highlights
+Keep both repositories beside each other:
 
-| Feature | Why it matters |
-| --- | --- |
-| **Pure PyQt5 Desktop App** | No Electron, no bundled browser. MilkChan is a native Qt window with tray integration, hotkeys, and transparency tricks to feel like part of your desktop. |
-| **Sprite-first UX** | Hundreds of 1080p sprites + overlays are cached into `~/.local/share/milkchan` for instant mood swaps, blinking, and speech animations. |
-| **Persona-aware AI** | The OpenAI-powered dialogue pipeline injects MILKCHAN.md persona lore, user memories, and mood instructions so her responses stay on-model. |
-| **Vision + Audio Context** | `BackgroundRecorder` uses `mss`, `soundcard`, and ffmpeg to capture screen/video as needed. The AI can “see” what you see when proactive mode is on. |
-| **Bootstrap Autonomy** | First launch copies all assets, builds a sprite cache, initializes SQLite, and downloads ffmpeg if missing. Users only run the binary. |
-| **Debian/Ubuntu builds** | `install.sh`, `run.sh`, and `build.sh` provide source setup, local launch, and one-file Linux release builds. |
-| **Memory & Agents** | SQLite-backed memory service, proactive/semantic background workers, and agent workers keep context between chats. |
-
-## Architecture Overview
-
-```
-./run.sh ─┐
-python -m milkchan.main ──▶ milkchan.desktop.app.main()
-                                 │
-                                 ├─ Bootstrap (milkchan.bootstrap)
-                                 │   ├─ copies assets → ~/.local/share/milkchan/assets
-                                 │   ├─ caches sprites → sprite_cache.pkl
-                                 │   └─ downloads ffmpeg if missing
-                                 │
-                                 ├─ UI (milkchan.desktop.ui)
-                                 │   ├─ SpriteWindow (PyQt5 window, tray icon, overlays)
-                                 │   ├─ ChatOverlay + SettingsWindow
-                                 │   └─ Global hotkeys, proactive timers, blink/mouth animators
-                                 │
-                                 ├─ Services (milkchan.desktop.services)
-                                 │   ├─ ai_client → OpenAI SDK + sprite-tool forcing
-                                 │   ├─ memory_client → SQLite persona/memory store
-                                 │   └─ model_fetcher → helper for assets/models
-                                 │
-                                 ├─ Utils
-                                 │   ├─ recorder.py → screen/audio capture
-                                 │   ├─ sprites.py → cache + normalization
-                                 │   └─ screen_watcher.py → proactive triggers
-                                 │
-                                 └─ Agents
-                                     ├─ SaveAndSendWorker, ProactiveMessageWorker, etc.
-                                     └─ Run in threads to keep UI snappy
+```text
+workspace/
+  MilkChan/
+  SentientMilk/
 ```
 
-## Asset & Bootstrap Pipeline
-1. **Bundled assets** live in `milkchan/desktop/assets/` (sprites, persona doc, icons, fonts).
-2. The PyInstaller binary carries these assets and extracts them to `sys._MEIPASS`.
-3. `milkchan.bootstrap.ensure_setup()` copies them to `~/.local/share/milkchan/assets`, then caches sprites into `sprite_cache.pkl` for instant loads.
-4. Minimum checks: required files (`MILKCHAN.md`, `icon.png`, `mappings.json`) and `MIN_SPRITE_FILES` ensure installs are healthy.
-5. If cache resolution differs from user settings, the app rebuilds it automatically.
-6. FFmpeg is auto-downloaded per-platform the first time you enable video context.
+Python 3.12 is the tested development version. Runtime data is stored under
+`~/.local/share/milkchan` and configuration under `~/.config/milkchan` on Linux.
+On Windows, Python resolves those paths beneath the user's home directory unless
+the XDG variables are set.
 
-## Getting Started (Developers)
+## Set up development
 
-### Prerequisites
-- Python 3.12 (project-tested), ≥3.9 supported.
-- `pipx` / `virtualenv` recommended.
-- OpenAI API key (store in `~/.config/milkchan/config.json` or `.env`).
+Linux:
 
-### 1. Clone & bootstrap
 ```bash
-git clone https://github.com/obezbolen67/MilkChanDesktop.git
-cd MilkChanDesktop
-./install.sh
+cd MilkChan
+python3.12 -m venv .venv
+source .venv/bin/activate
+python scripts/project.py setup
 ```
 
-### 2. Run in dev mode
+Windows PowerShell:
+
+For automatic setup and development launch, run `./run.bat`. To build the
+Windows one-file executable, run `./build.bat`; the result is
+`dist/MilkChan.exe`. Both scripts work from any working directory, reuse
+`.venv-win`, and create it with `py -3.12` when missing. Install Python 3.12
+with the Windows Python launcher first. Dependencies are installed on first
+use; set `MILKCHAN_SETUP=1` to reinstall after dependency changes.
+
+By default, the scripts use the sibling `SentientMilk` checkout. Set
+`$env:SENTIENTMILK_ROOT = 'C:\path\to\SentientMilk'` to use another checkout.
+`run.bat` keeps logs in the console and forwards app arguments, for example
+`./run.bat --self-test-runtime`. Source runs always use the SentientMilk checkout
+on `PYTHONPATH`; only packaged builds load framework updates from user data.
+
+For manual setup:
+
+```powershell
+cd MilkChan
+py -3.12 -m venv .venv-win
+.\.venv-win\Scripts\Activate.ps1
+python scripts\project.py setup
+```
+
+The setup command installs both local repositories in editable mode, including
+their test, lint and build dependencies.
+
+## Run, test, and debug
+
+The same commands work on Windows and Linux:
+
 ```bash
-./run.sh
+python scripts/project.py dev
+python scripts/project.py test
+python scripts/project.py lint
+python scripts/project.py format
 ```
-The first launch displays a setup dialog while assets copy & cache. You’ll find assets, DB, cache, recordings, FFmpeg, and framework updates in `~/.local/share/milkchan/`; config in `~/.config/milkchan/config.json`.
 
-### 3. Configure MilkChan
-- `~/.config/milkchan/config.json` stores scale, persona overrides, OpenAI credentials, proactive settings, etc.
-- In-app settings window persists changes via `milkchan.core.config`.
+`dev` launches `python -m milkchan.main` and points `PYTHONPATH` at the sibling
+SentientMilk checkout. Logs remain attached to the terminal. Run one suite
+directly when narrowing a failure:
 
-### 4. Debug tips
-- Sprite/asset issues → delete `~/.local/share/milkchan` to force bootstrap.
-- Vision errors → confirm ffmpeg presence (`milkchan/bootstrap.py` auto-downloads, or install system ffmpeg).
-- Console-only run: `python -m milkchan.desktop.app` shows detailed logs.
+```bash
+python -m pytest -q tests/test_character.py
+python -m pytest -q ../SentientMilk/tests
+```
 
-## Packaged Builds
+Use `--sentient-root PATH` before the command if the repositories are not
+siblings. Add `--dry-run` to inspect orchestration without executing it:
 
-### Linux single binary
+```bash
+python scripts/project.py --sentient-root ../framework --dry-run test
+```
+
+## Build
+
+Build a native executable for the current OS from the active environment:
+
+```bash
+python scripts/project.py build
+```
+
+Output is written to `dist/`. PyInstaller does not cross-compile: run this on
+Windows for a Windows executable and on Linux for a Linux executable.
+
+For the reproducible Debian/Ubuntu one-file release, Docker is used when
+available:
+
 ```bash
 ./build.sh
-chmod +x dist/MilkChan
-./dist/MilkChan
-```
-User-local release installation:
-```bash
-./dist/MilkChan --install-user
-# Installs to ~/.local/share/opt/milkchan and creates launcher + desktop entry
 ```
 
-`build.sh` relies on `MilkChan.spec`, which bundles PyQt5, sprites, persona docs, FFmpeg, SentientMilk, and runtime hooks (`pyi_rth_qt.py`).
+Use `./build.sh --native` to build directly on Debian/Ubuntu.
+
+## Characters
+
+A character is one body image per pose plus small face layers per mood; the app
+composites blinking, thinking eyes and the talking mouth while it runs. A new
+character with one pose and three moods takes 8 images. Import and preview
+characters under **Settings → Character**; see
+[custom characters](docs/custom-sprites.md) for the layout.
+
+The brain only chooses a pose and a mood. Blinks, idle glances, thinking eyes
+and the mouth are animated locally, so they cost no tokens and no requests.
+
+## The brain
+
+MilkChan connects to the running SentientMilk brain and starts it when none runs, as
+its own process (packaged builds run `MilkChan --serve-brain`). The brain keeps
+running while it has work, then exits on its own. MilkChan declares itself as the
+`milkchan` app: the character's name, the desktop environment, the default persona
+from `assets/MILKCHAN.md`, the character's poses and moods as the `expression`
+signal, and the toolkits it uses (memory, web, todo, journal, schedule, tasks). A
+new character is declared as soon as it is chosen.
+
+Each message goes with a screenshot (when **Settings → Vision → Send screenshots**
+is on) and the user's name; the brain answers with the reply and a pose and mood.
+Proactive messages are MilkChan's feature: after a quiet while it sends an idle
+event, and the brain may answer or stay silent. Reminders the brain schedules
+("remind me in an hour to stretch") and finished background tasks arrive as
+notifications; MilkChan turns each into a turn, so the character says it. Those
+that came while MilkChan was closed arrive on the next start. MilkChan cannot show
+approval prompts, so tools that need one are declined.
+
+The persona, provider, tools, memory and full history live in the brain
+(`~/.sentientmilk`, see the SentientMilk README). **Clear History** clears
+MilkChan's `main` session there.
+
+Earlier versions kept the provider settings in `config.json` and the history,
+memories and persona in `milkchan.db`. On the first start they move into the
+brain once; the database stays on disk as `milkchan.db.imported`. A brain that
+already has an API key keeps its own settings, and one that already has a
+MilkChan history keeps it.
+
+## Architecture
+
+```text
+milkchan.main                maintenance commands, then the desktop app
+  ├─ paths                   user data, config and bundled asset locations
+  ├─ terminal_chat           Rich console client (talks to the app over IPC)
+  └─ desktop.app             Qt lifecycle, tray, updater
+      ├─ desktop.ui          character, chat overlay and settings windows
+      ├─ desktop.sprites     character format, library and Qt renderer
+      ├─ desktop.agents      background chat workers
+      ├─ desktop.services    brain link, IPC/streaming, hand-over of old data
+      ├─ desktop.utils       screenshots and narration audio
+      └─ core                configuration and staged brain updater
+
+SentientMilk                 the brain: server, agent loop, tools, memory, tasks, schedules
+```
+
+Packaged builds keep SentientMilk current: the updater downloads every framework
+file from one exact commit into a staging directory, rejects partial snapshots
+and commits from before the v2 brain, and only then swaps the copy in user data.
+Source checkouts are never modified.
+
+The terminal chat connects to `127.0.0.1` only, with a random token that the app
+passes to the terminal it opens; other local programs cannot use the IPC ports.
 
 ## Configuration
-Key settings shipped by `milkchan/core/config.py`:
-- **position / scale_factor** – where MilkChan floats and how big she is.
-- **sprite_resolution_scale** – rebuild cache at higher/lower fidelity.
-- **processing** – toggle video vs image capture, audio buffers, proactive cadence.
-- **openai_* fields** – API key, base URL, chat + vision models.
-- **proactive thresholds** – control semantic/visual triggers for unsolicited messages.
 
-Edit via settings UI or by hand in `~/.config/milkchan/config.json`.
+**Settings → Connection**, **Tools** and the model options under **Vision** edit
+the brain's settings; everything else is MilkChan's own. Only the API key is
+required: an empty base URL or model uses SentientMilk's default
+(`https://api.refuseless.com/v1`, `deepseek-v4.1-flash-fast`). Keys are
+write-only: the brain never shows them, an empty field keeps the stored one,
+and `sentientmilk config api_key=` removes it.
 
-## Troubleshooting
-| Symptom | Fix |
-| --- | --- |
-| MilkChan doesn’t appear in applications menu after install | Re-run `./install.sh` or `MilkChan --install-user` and run `update-desktop-database`. |
-| “Assets missing” / blank sprite window | Delete `~/.local/share/milkchan` and relaunch to force bootstrap, or ensure packaged build includes `milkchan/desktop/assets`. |
-| FFmpeg missing dialog | Wait for auto-download or place ffmpeg binary in `~/.local/share/milkchan`. |
-| Qt crashes on Linux Wayland | Export `QT_QPA_PLATFORM=xcb` (the launcher script already does this). |
-| Vision context stalls | Confirm screen recording permissions and that `soundcard` / `mss` can access displays. |
+Thinking budget is available under **Settings → Connection**: provider default,
+off, effort levels, or a custom token budget. Effort levels use
+`reasoning_effort` for compatible providers and `reasoning.effort` on OpenRouter;
+custom tokens use `reasoning.max_tokens`. The selected provider and model must
+support the chosen control. Provider default sends no extra reasoning parameter.
 
-## Folder Structure
-```
-MilkChanDesktop/
-├── milkchan/
-│   ├── main.py                 # entry point
-│   ├── bootstrap.py            # asset + ffmpeg setup
-│   ├── desktop/
-│   │   ├── app.py              # PyQt5 bootstrap + tray
-│   │   ├── ui/                 # SpriteWindow, overlays, settings
-│   │   ├── services/           # ai_client, memory_client, etc.
-│   │   ├── utils/              # recorder, sprites, screen_watcher
-│   │   └── agents/             # worker threads
-│   └── core/                   # config loader, storage glue
-├── install.sh                 # Debian/Ubuntu source installer
-├── run.sh                     # source launcher
-├── build.sh                   # one-file Debian/Ubuntu release builder
-├── MilkChan.spec              # PyInstaller definition
-└── README.md
-```
+For text-only models, turn off **Settings → Vision → The model accepts images**.
+The brain then keeps earlier screenshots in the history but stops sending them.
+**Request budget** caps the size of each request (800 KiB fits behind nginx's
+common 1 MiB limit).
 
-## Credits & License
-- © [obezbolen67](https://github.com/obezbolen67) – MIT License (see `pyproject.toml`).
-- Sprites and sounds are extracted from [Milk outside a bag of milk outside a bag of milk](https://store.steampowered.com/app/1604000/Milk_outside_a_bag_of_milk_outside_a_bag_of_milk/) game, made by [Nikita Kryukov](https://nikita-kryukov.itch.io/).
-- Big thanks to the PyQt5, OpenAI, FFmpeg, and MSS communities.
+Bundled assets are read in place. On start, MilkChan deletes files that
+earlier versions left in user data (the sprite cache, a copied asset folder, an
+FFmpeg download, temporary recordings and config backups that duplicated the
+API key).
 
-Have fun with MilkChan! Contributions and feature ideas are welcome—open an issue or PR.
-<img width="54" height="54" alt="9cfd552e0d7cc165f2d2a6c4aa4001b1d83edba5" src="https://github.com/user-attachments/assets/d44230ef-4d26-4598-88cb-61d22811a08e" />
+## License and assets
+
+Code is MIT-licensed. MilkChan sprites and sounds originate from *Milk outside a
+bag of milk outside a bag of milk* by Nikita Kryukov; review the upstream asset
+rights before redistributing packaged builds.

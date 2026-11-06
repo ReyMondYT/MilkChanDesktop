@@ -4,7 +4,6 @@ import stat
 import sys
 from pathlib import Path
 
-
 APP_NAME = "MilkChan"
 APP_ID = "milkchan"
 
